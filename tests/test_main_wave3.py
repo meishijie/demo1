@@ -59,12 +59,18 @@ class MainWave3LogicTests(unittest.TestCase):
         ]
         game = make_game(units)
         game.current_turn = Side.ENEMY
+        enemy_before = game._unit_by_id(ENEMY_COMMANDER_ID)
+        self.assertIsNotNone(enemy_before)
+        enemy_before_pos = enemy_before.position
 
         game._update_enemy_turn()
 
         player_lord = game._unit_by_id(PLAYER_COMMANDER_ID)
+        enemy_after = game._unit_by_id(ENEMY_COMMANDER_ID)
         self.assertIsNotNone(player_lord)
+        self.assertIsNotNone(enemy_after)
         self.assertLess(player_lord.hp, 100)
+        self.assertEqual(enemy_after.position, enemy_before_pos)
         self.assertIn(ENEMY_COMMANDER_ID, game.enemy_acted_unit_ids)
 
     def test_enemy_turn_moves_toward_target_when_no_attack(self) -> None:
@@ -107,6 +113,33 @@ class MainWave3LogicTests(unittest.TestCase):
         self.assertEqual(game.current_turn, Side.PLAYER)
         self.assertEqual(game.acted_unit_ids, set())
         self.assertEqual(game.enemy_acted_unit_ids, set())
+
+    def test_enemy_multi_turn_flow_no_stall_and_no_duplicate_attack_in_phase(self) -> None:
+        units = [
+            Unit(PLAYER_COMMANDER_ID, Side.PLAYER, UnitType.SPEAR, (2, 1), hp=100),
+            Unit(ENEMY_COMMANDER_ID, Side.ENEMY, UnitType.SPEAR, (1, 1), hp=100),
+        ]
+        game = make_game(units)
+        game.current_turn = Side.PLAYER
+
+        for _ in range(3):
+            player_before_phase = game._unit_by_id(PLAYER_COMMANDER_ID)
+            self.assertIsNotNone(player_before_phase)
+            hp_before_phase = player_before_phase.hp
+
+            game._switch_to_enemy_turn(manual=True)
+            guard = 0
+            while game.current_turn == Side.ENEMY and not game.game_over:
+                guard += 1
+                self.assertLessEqual(guard, 2, "enemy phase should finish without stalling")
+                game.enemy_turn_countdown = 0
+                game._update_enemy_turn()
+
+            player_after_phase = game._unit_by_id(PLAYER_COMMANDER_ID)
+            self.assertIsNotNone(player_after_phase)
+            self.assertEqual(game.current_turn, Side.PLAYER)
+            self.assertEqual(player_after_phase.hp, hp_before_phase - 10)
+            self.assertFalse(game.game_over)
 
     def test_player_defeats_enemy_commander_triggers_victory(self) -> None:
         units = [
