@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "pyxel": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["--from", "pyxel-mcp", "pyxel-mcp"]
+    }
+  }
+}
