@@ -419,17 +419,16 @@ class Game:
         defender_terrain = unit_system.TerrainType(
             self.terrain_map[defender.position[1]][defender.position[0]].name.lower()
         )
-        resolution = unit_system.resolve_combat(attacker, defender, defender_terrain)
-        if resolution.defender_defeated:
+        preview = unit_system.preview_combat(attacker, defender, defender_terrain)
+        next_hp = max(0, defender.hp - preview.predicted_damage)
+        if next_hp == 0:
             self._remove_unit(defender.unit_id)
             self.status_text = (
-                f"{attacker.unit_id} dealt {resolution.predicted_damage} and defeated {defender.unit_id}"
+                f"{attacker.unit_id} dealt {preview.predicted_damage} and defeated {defender.unit_id}"
             )
         else:
-            self._replace_unit(replace(defender, hp=resolution.defender_next_hp))
-            self.status_text = (
-                f"{attacker.unit_id} dealt {resolution.predicted_damage} to {defender.unit_id}"
-            )
+            self._replace_unit(replace(defender, hp=next_hp))
+            self.status_text = f"{attacker.unit_id} dealt {preview.predicted_damage} to {defender.unit_id}"
 
     def _auto_switch_turn_if_needed(self) -> None:
         if self.game_over:

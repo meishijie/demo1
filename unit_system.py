@@ -51,15 +51,6 @@ class CombatPreview:
     predicted_damage: int
 
 
-@dataclass(frozen=True)
-class CombatResolution:
-    attacker_multiplier: float
-    defender_defense_bonus: int
-    predicted_damage: int
-    defender_next_hp: int
-    defender_defeated: bool
-
-
 BASE_UNIT_STATS: dict[UnitType, UnitStats] = {
     UnitType.SPEAR: UnitStats(attack=24, defense=14, movement=3, min_range=1, max_range=1),
     UnitType.CAVALRY: UnitStats(attack=28, defense=12, movement=5, min_range=1, max_range=1),
@@ -125,7 +116,7 @@ def can_unit_enter_tile(
     return terrain_type not in IMPASSABLE_TERRAINS
 
 
-def preview_combat(attacker: Unit, defender: Unit, defender_terrain: TerrainType | str) -> CombatPreview:
+def preview_combat(attacker: Unit, defender: Unit, defender_terrain: TerrainType) -> CombatPreview:
     attacker_stats = get_unit_stats(attacker.unit_type)
     defender_stats = get_unit_stats(defender.unit_type)
     multiplier = counter_multiplier(attacker.unit_type, defender.unit_type)
@@ -136,18 +127,6 @@ def preview_combat(attacker: Unit, defender: Unit, defender_terrain: TerrainType
         attacker_multiplier=multiplier,
         defender_defense_bonus=defense_bonus,
         predicted_damage=predicted_damage,
-    )
-
-
-def resolve_combat(attacker: Unit, defender: Unit, defender_terrain: TerrainType | str) -> CombatResolution:
-    preview = preview_combat(attacker, defender, defender_terrain)
-    defender_next_hp = max(0, defender.hp - preview.predicted_damage)
-    return CombatResolution(
-        attacker_multiplier=preview.attacker_multiplier,
-        defender_defense_bonus=preview.defender_defense_bonus,
-        predicted_damage=preview.predicted_damage,
-        defender_next_hp=defender_next_hp,
-        defender_defeated=defender_next_hp == 0,
     )
 
 
