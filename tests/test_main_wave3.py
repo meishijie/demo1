@@ -1,7 +1,22 @@
 import unittest
+from unittest import mock
 
+import main as main_module
 from main import ENEMY_COMMANDER_ID, PLAYER_COMMANDER_ID, Game, Terrain, manhattan_distance
 from unit_system import Side, Unit, UnitType
+
+
+class _FakePyxelInput:
+    MOUSE_BUTTON_LEFT = 0
+    MOUSE_BUTTON_RIGHT = 1
+
+    def __init__(self) -> None:
+        self.mouse_x = 0
+        self.mouse_y = 0
+        self._pressed_buttons: set[int] = set()
+
+    def btnp(self, key: int) -> bool:
+        return key in self._pressed_buttons
 
 
 def make_game(units: list[Unit], map_width: int = 10, map_height: int = 10) -> Game:
@@ -30,6 +45,13 @@ def make_game(units: list[Unit], map_width: int = 10, map_height: int = 10) -> G
 
 
 class MainWave3LogicTests(unittest.TestCase):
+    def _left_click_tile(self, game: Game, fake_pyxel: _FakePyxelInput, tile: tuple[int, int]) -> None:
+        fake_pyxel.mouse_x = tile[0] * main_module.TILE_SIZE + main_module.TILE_SIZE // 2
+        fake_pyxel.mouse_y = tile[1] * main_module.TILE_SIZE + main_module.TILE_SIZE // 2
+        fake_pyxel._pressed_buttons = {fake_pyxel.MOUSE_BUTTON_LEFT}
+        game._handle_player_input()
+        fake_pyxel._pressed_buttons.clear()
+
     def test_enemy_turn_attacks_when_target_in_range(self) -> None:
         units = [
             Unit(PLAYER_COMMANDER_ID, Side.PLAYER, UnitType.SPEAR, (2, 1), hp=100),
@@ -118,6 +140,71 @@ class MainWave3LogicTests(unittest.TestCase):
         self.assertTrue(game.game_over)
         self.assertEqual(game.winner_side, Side.ENEMY)
         self.assertIsNone(game._unit_by_id(PLAYER_COMMANDER_ID))
+
+    def test_player_input_attack_updates_hp_and_switches_turn(self) -> None:
+        units = [
+            Unit(PLAYER_COMMANDER_ID, Side.PLAYER, UnitType.SPEAR, (1, 1), hp=100),
+            Unit(ENEMY_COMMANDER_ID, Side.ENEMY, UnitType.SPEAR, (2, 1), hp=100),
+        ]
+        game = make_game(units)
+        fake_pyxel = _FakePyxelInput()
+
+        with mock.patch.object(main_module, "pyxel", fake_pyxel):
+            self._left_click_tile(game, fake_pyxel, (1, 1))
+            self.assertEqual(game.selected_unit_id, PLAYER_COMMANDER_ID)
+            self.assertIn((2, 1), game.attack_candidates)
+
+            self._left_click_tile(game, fake_pyxel, (2, 1))
+
+        defender = game._unit_by_id(ENEMY_COMMANDER_ID)
+        self.assertIsNotNone(defender)
+        self.assertEqual(defender.hp, 90)
+        self.assertIn(PLAYER_COMMANDER_ID, game.acted_unit_ids)
+        self.assertEqual(game.current_turn, Side.ENEMY)
+
+    def test_acted_player_unit_cannot_attack_twice_in_same_turn(self) -> None:
+        units = [
+            Unit(PLAYER_COMMANDER_ID, Side.PLAYER, UnitType.SPEAR, (1, 1), hp=100),
+            Unit("p_arch", Side.PLAYER, UnitType.ARCHER, (0, 0), hp=100),
+            Unit(ENEMY_COMMANDER_ID, Side.ENEMY, UnitType.SPEAR, (2, 1), hp=100),
+        ]
+        game = make_game(units)
+        fake_pyxel = _FakePyxelInput()
+
+        with mock.patch.object(main_module, "pyxel", fake_pyxel):
+            self._left_click_tile(game, fake_pyxel, (1, 1))
+            self._left_click_tile(game, fake_pyxel, (2, 1))
+            defender_after_first_attack = game._unit_by_id(ENEMY_COMMANDER_ID)
+            self.assertIsNotNone(defender_after_first_attack)
+            hp_after_first_attack = defender_after_first_attack.hp
+
+            self._left_click_tile(game, fake_pyxel, (1, 1))
+            self._left_click_tile(game, fake_pyxel, (2, 1))
+
+        defender_after_retry = game._unit_by_id(ENEMY_COMMANDER_ID)
+        self.assertIsNotNone(defender_after_retry)
+        self.assertEqual(defender_after_retry.hp, hp_after_first_attack)
+        self.assertIn(PLAYER_COMMANDER_ID, game.acted_unit_ids)
+        self.assertEqual(game.current_turn, Side.PLAYER)
+
+    def test_hovered_enemy_reflects_post_attack_hp(self) -> None:
+        units = [
+            Unit(PLAYER_COMMANDER_ID, Side.PLAYER, UnitType.SPEAR, (1, 1), hp=100),
+            Unit(ENEMY_COMMANDER_ID, Side.ENEMY, UnitType.SPEAR, (2, 1), hp=100),
+        ]
+        game = make_game(units)
+        game.hovered_unit_id = ENEMY_COMMANDER_ID
+
+        attacker = game._unit_by_id(PLAYER_COMMANDER_ID)
+        defender = game._unit_by_id(ENEMY_COMMANDER_ID)
+        self.assertIsNotNone(attacker)
+        self.assertIsNotNone(defender)
+
+        game._execute_attack(attacker, defender)
+
+        hovered_enemy = game._unit_by_id(game.hovered_unit_id)
+        self.assertIsNotNone(hovered_enemy)
+        self.assertEqual(hovered_enemy.hp, 90)
 
 
 if __name__ == "__main__":
