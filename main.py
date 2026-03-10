@@ -52,10 +52,7 @@ def can_unit_enter_tile(terrain: Terrain, unit_type: str | None = None) -> bool:
         return False
 
     if unit_system and hasattr(unit_system, "can_unit_enter_tile"):
-        try:
-            return bool(unit_system.can_unit_enter_tile(terrain=terrain.name.lower(), unit_type=unit_type))
-        except Exception:
-            return True
+        return bool(unit_system.can_unit_enter_tile(terrain.name.lower(), unit_type))
     return True
 
 

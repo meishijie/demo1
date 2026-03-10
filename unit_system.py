@@ -72,6 +72,12 @@ CAVALRY_FOREST_MOVE_PENALTY = 1
 IMPASSABLE_TERRAINS: set[TerrainType] = {TerrainType.RIVER, TerrainType.SEA}
 
 
+def _normalize_terrain(terrain: TerrainType | str) -> TerrainType:
+    if isinstance(terrain, TerrainType):
+        return terrain
+    return TerrainType(str(terrain).lower())
+
+
 def get_unit_stats(unit_type: UnitType) -> UnitStats:
     return BASE_UNIT_STATS[unit_type]
 
@@ -84,15 +90,17 @@ def counter_multiplier(attacker_type: UnitType, defender_type: UnitType) -> floa
     return 1.0
 
 
-def terrain_defense_bonus(terrain: TerrainType) -> int:
-    if terrain is TerrainType.FOREST:
+def terrain_defense_bonus(terrain: TerrainType | str) -> int:
+    terrain_type = _normalize_terrain(terrain)
+    if terrain_type is TerrainType.FOREST:
         return FOREST_DEFENSE_BONUS
     return 0
 
 
-def movement_cost(unit_type: UnitType, terrain: TerrainType) -> int:
+def movement_cost(unit_type: UnitType, terrain: TerrainType | str) -> int:
+    terrain_type = _normalize_terrain(terrain)
     cost = 1
-    if unit_type is UnitType.CAVALRY and terrain is TerrainType.FOREST:
+    if unit_type is UnitType.CAVALRY and terrain_type is TerrainType.FOREST:
         cost += CAVALRY_FOREST_MOVE_PENALTY
     return cost
 
@@ -104,14 +112,7 @@ def can_unit_enter_tile(
     # unit_type is reserved for future per-unit passability rules.
     _ = unit_type
 
-    if isinstance(terrain, TerrainType):
-        terrain_type = terrain
-    else:
-        try:
-            terrain_type = TerrainType(str(terrain).lower())
-        except ValueError:
-            return True
-
+    terrain_type = _normalize_terrain(terrain)
     return terrain_type not in IMPASSABLE_TERRAINS
 
 
@@ -159,7 +160,7 @@ def build_enemy_zoc(
 def reachable_tiles(
     unit: Unit,
     units: Sequence[Unit],
-    terrain_map: Mapping[Coord, TerrainType],
+    terrain_map: Mapping[Coord, TerrainType | str],
     map_width: int,
     map_height: int,
 ) -> set[Coord]:
@@ -178,7 +179,7 @@ def reachable_tiles(
             if nxt in occupied:
                 continue
 
-            terrain = terrain_map.get(nxt, TerrainType.PLAIN)
+            terrain = _normalize_terrain(terrain_map.get(nxt, TerrainType.PLAIN))
             if not can_unit_enter_tile(terrain=terrain, unit_type=unit.unit_type):
                 continue
 
@@ -211,7 +212,7 @@ def can_move_to(
     unit: Unit,
     target: Coord,
     units: Sequence[Unit],
-    terrain_map: Mapping[Coord, TerrainType],
+    terrain_map: Mapping[Coord, TerrainType | str],
     map_width: int,
     map_height: int,
 ) -> bool:
