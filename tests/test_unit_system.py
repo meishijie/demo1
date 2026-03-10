@@ -12,6 +12,7 @@ from unit_system import (
     movement_cost,
     preview_combat,
     reachable_tiles,
+    resolve_combat,
     terrain_defense_bonus,
 )
 
@@ -41,6 +42,26 @@ class UnitSystemTests(unittest.TestCase):
 
         self.assertEqual(terrain_defense_bonus(TerrainType.FOREST), 2)
         self.assertGreater(plain.predicted_damage, forest.predicted_damage)
+
+    def test_resolve_combat_enforces_minimum_damage_floor(self) -> None:
+        attacker = Unit("p_arch", Side.PLAYER, UnitType.ARCHER, (1, 1))
+        defender = Unit("e_cav", Side.ENEMY, UnitType.CAVALRY, (2, 1), hp=50)
+
+        result = resolve_combat(attacker, defender, TerrainType.FOREST)
+
+        self.assertEqual(result.predicted_damage, 1)
+        self.assertEqual(result.defender_next_hp, 49)
+        self.assertFalse(result.defender_defeated)
+
+    def test_resolve_combat_marks_defeat_when_hp_reaches_zero(self) -> None:
+        attacker = Unit("p_spear", Side.PLAYER, UnitType.SPEAR, (1, 1))
+        defender = Unit("e_cav", Side.ENEMY, UnitType.CAVALRY, (2, 1), hp=10)
+
+        result = resolve_combat(attacker, defender, TerrainType.PLAIN)
+
+        self.assertEqual(result.predicted_damage, 18)
+        self.assertEqual(result.defender_next_hp, 0)
+        self.assertTrue(result.defender_defeated)
 
     def test_cavalry_forest_move_penalty(self) -> None:
         self.assertEqual(movement_cost(UnitType.CAVALRY, TerrainType.PLAIN), 1)
