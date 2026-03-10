@@ -31,6 +31,8 @@ ENEMY_TURN_DELAY_FRAMES = 26
 TOP_BAR_HEIGHT = 16
 BOTTOM_BAR_HEIGHT = 12
 END_TURN_BUTTON = (SCREEN_WIDTH - 72, 2, 68, 12)
+PLAYER_COMMANDER_ID = "p_lord"
+ENEMY_COMMANDER_ID = "e_lord"
 
 
 class Terrain(IntEnum):
@@ -165,6 +167,7 @@ class Game:
         self.units = self._create_initial_units()
         self.current_turn = unit_system.Side.PLAYER
         self.acted_unit_ids: set[str] = set()
+        self.enemy_acted_unit_ids: set[str] = set()
 
         self.selected_unit_id: str | None = None
         self.move_candidates: set[tuple[int, int]] = set()
@@ -172,6 +175,8 @@ class Game:
 
         self.hovered_unit_id: str | None = None
         self.enemy_turn_countdown = 0
+        self.game_over = False
+        self.winner_side: unit_system.Side | None = None
         self.status_text = "Player turn: choose a unit"
 
         self.default_font, self.compact_font = self._load_fonts()
@@ -227,21 +232,119 @@ class Game:
     def update(self) -> None:
         self._update_edge_scroll()
         self._update_hovered_unit()
+        if self.game_over or self._check_battle_end():
+            return
 
         if self.current_turn == unit_system.Side.ENEMY:
-            self._update_enemy_turn_placeholder()
+            self._update_enemy_turn()
             return
 
         self._handle_player_input()
 
-    def _update_enemy_turn_placeholder(self) -> None:
+    def _update_enemy_turn(self) -> None:
         if self.enemy_turn_countdown > 0:
             self.enemy_turn_countdown -= 1
             return
 
+        enemy_unit = self._next_unacted_enemy_unit()
+        if enemy_unit is None:
+            self._start_player_turn()
+            return
+
+        if not self._enemy_try_attack(enemy_unit):
+            self._enemy_try_advance(enemy_unit)
+
+        self.enemy_acted_unit_ids.add(enemy_unit.unit_id)
+        if self._check_battle_end():
+            return
+        self.enemy_turn_countdown = max(1, ENEMY_TURN_DELAY_FRAMES // 3)
+
+    def _start_player_turn(self) -> None:
         self.current_turn = unit_system.Side.PLAYER
         self.acted_unit_ids.clear()
+        self.enemy_acted_unit_ids.clear()
         self.status_text = "Player turn: choose a unit"
+
+    def _next_unacted_enemy_unit(self) -> "unit_system.Unit | None":
+        for unit in self.units:
+            if unit.side != unit_system.Side.ENEMY:
+                continue
+            if unit.unit_id in self.enemy_acted_unit_ids or unit.hp <= 0:
+                continue
+            return unit
+        return None
+
+    def _enemy_try_attack(self, enemy_unit: "unit_system.Unit") -> bool:
+        attack_tiles = attackable_enemy_positions(enemy_unit, self.units)
+        if not attack_tiles:
+            return False
+
+        targets = [
+            unit
+            for unit in self.units
+            if unit.side == unit_system.Side.PLAYER and unit.position in attack_tiles and unit.hp > 0
+        ]
+        if not targets:
+            return False
+
+        target = min(
+            targets,
+            key=lambda unit: (
+                unit.unit_id != PLAYER_COMMANDER_ID,
+                unit.hp,
+                manhattan_distance(enemy_unit.position, unit.position),
+            ),
+        )
+        self._apply_attack(enemy_unit, target)
+        return True
+
+    def _enemy_try_advance(self, enemy_unit: "unit_system.Unit") -> bool:
+        target = self._select_enemy_target(enemy_unit)
+        if target is None:
+            self.status_text = f"{enemy_unit.unit_id} holds position"
+            return False
+
+        reachable = unit_system.reachable_tiles(
+            unit=enemy_unit,
+            units=self.units,
+            terrain_map=self.terrain_lookup,
+            map_width=self.map_width,
+            map_height=self.map_height,
+        )
+        if not reachable:
+            self.status_text = f"{enemy_unit.unit_id} holds position"
+            return False
+
+        current_distance = manhattan_distance(enemy_unit.position, target.position)
+        best_tile = min(
+            reachable,
+            key=lambda tile: (
+                manhattan_distance(tile, target.position),
+                manhattan_distance(tile, enemy_unit.position),
+                tile[1],
+                tile[0],
+            ),
+        )
+        if manhattan_distance(best_tile, target.position) >= current_distance:
+            self.status_text = f"{enemy_unit.unit_id} holds position"
+            return False
+
+        self._replace_unit(replace(enemy_unit, position=best_tile))
+        self.status_text = f"{enemy_unit.unit_id} advanced to {best_tile}"
+        return True
+
+    def _select_enemy_target(self, enemy_unit: "unit_system.Unit") -> "unit_system.Unit | None":
+        player_units = [unit for unit in self.units if unit.side == unit_system.Side.PLAYER and unit.hp > 0]
+        if not player_units:
+            return None
+        return min(
+            player_units,
+            key=lambda unit: (
+                unit.unit_id != PLAYER_COMMANDER_ID,
+                manhattan_distance(enemy_unit.position, unit.position),
+                unit.hp,
+            ),
+        )
 
     def _handle_player_input(self) -> None:
         if pyxel.btnp(pyxel.MOUSE_BUTTON_RIGHT):
@@ -305,6 +408,14 @@ class Game:
         self._auto_switch_turn_if_needed()
 
     def _execute_attack(self, attacker: "unit_system.Unit", defender: "unit_system.Unit") -> None:
+        self._apply_attack(attacker, defender)
+        self.acted_unit_ids.add(attacker.unit_id)
+        self._clear_selection()
+        if self._check_battle_end():
+            return
+        self._auto_switch_turn_if_needed()
+
+    def _apply_attack(self, attacker: "unit_system.Unit", defender: "unit_system.Unit") -> None:
         defender_terrain = unit_system.TerrainType(
             self.terrain_map[defender.position[1]][defender.position[0]].name.lower()
         )
@@ -319,23 +430,45 @@ class Game:
             self._replace_unit(replace(defender, hp=next_hp))
             self.status_text = f"{attacker.unit_id} dealt {preview.predicted_damage} to {defender.unit_id}"
 
-        self.acted_unit_ids.add(attacker.unit_id)
-        self._clear_selection()
-        self._auto_switch_turn_if_needed()
-
     def _auto_switch_turn_if_needed(self) -> None:
+        if self.game_over:
+            return
         if has_unacted_units(self.units, unit_system.Side.PLAYER, self.acted_unit_ids):
             return
         self._switch_to_enemy_turn(manual=False)
 
     def _switch_to_enemy_turn(self, manual: bool) -> None:
+        if self.game_over:
+            return
         self._clear_selection()
         self.current_turn = unit_system.Side.ENEMY
         self.enemy_turn_countdown = ENEMY_TURN_DELAY_FRAMES
+        self.enemy_acted_unit_ids.clear()
         if manual:
             self.status_text = "Player ended turn manually"
         else:
             self.status_text = "All units acted; enemy turn"
+
+    def _check_battle_end(self) -> bool:
+        if self.game_over:
+            return True
+
+        player_lord_alive = self._unit_by_id(PLAYER_COMMANDER_ID) is not None
+        enemy_lord_alive = self._unit_by_id(ENEMY_COMMANDER_ID) is not None
+        if player_lord_alive and enemy_lord_alive:
+            return False
+
+        self.game_over = True
+        self.enemy_turn_countdown = 0
+        self._clear_selection()
+
+        if enemy_lord_alive:
+            self.winner_side = unit_system.Side.ENEMY
+            self.status_text = "Defeat: your commander was defeated"
+        else:
+            self.winner_side = unit_system.Side.PLAYER
+            self.status_text = "Victory: enemy commander defeated"
+        return True
 
     def _unit_by_id(self, unit_id: str | None) -> "unit_system.Unit | None":
         if unit_id is None:
@@ -357,6 +490,7 @@ class Game:
     def _remove_unit(self, unit_id: str) -> None:
         self.units = [unit for unit in self.units if unit.unit_id != unit_id]
         self.acted_unit_ids.discard(unit_id)
+        self.enemy_acted_unit_ids.discard(unit_id)
         if self.selected_unit_id == unit_id:
             self._clear_selection()
 
@@ -437,6 +571,7 @@ class Game:
         self._draw_top_bar()
         self._draw_bottom_bar()
         self._draw_hover_unit_info()
+        self._draw_battle_result()
 
     def _draw_action_candidates(self) -> None:
         for map_x, map_y in self.move_candidates:
@@ -472,11 +607,14 @@ class Game:
 
     def _draw_top_bar(self) -> None:
         pyxel.rect(0, 0, SCREEN_WIDTH, TOP_BAR_HEIGHT, 0)
-        turn_text = "TURN: PLAYER" if self.current_turn == unit_system.Side.PLAYER else "TURN: ENEMY"
+        if self.game_over:
+            turn_text = "BATTLE END"
+        else:
+            turn_text = "TURN: PLAYER" if self.current_turn == unit_system.Side.PLAYER else "TURN: ENEMY"
         self._draw_text(4, 4, turn_text, 7, compact=True)
 
         button_x, button_y, button_w, button_h = END_TURN_BUTTON
-        button_color = 2 if self.current_turn == unit_system.Side.PLAYER else 5
+        button_color = 2 if (self.current_turn == unit_system.Side.PLAYER and not self.game_over) else 5
         pyxel.rect(button_x, button_y, button_w, button_h, button_color)
         pyxel.rectb(button_x, button_y, button_w, button_h, 7)
         self._draw_text(button_x + 8, button_y + 3, "End Turn", 7, compact=True)
@@ -526,6 +664,21 @@ class Game:
         elif terrain == Terrain.SEA:
             pyxel.line(x + 1, y + 5, x + TILE_SIZE - 2, y + 5, 6)
             pyxel.line(x + 3, y + 11, x + TILE_SIZE - 4, y + 11, 6)
+
+    def _draw_battle_result(self) -> None:
+        if not self.game_over:
+            return
+
+        box_w = 148
+        box_h = 38
+        box_x = (SCREEN_WIDTH - box_w) // 2
+        box_y = (SCREEN_HEIGHT - box_h) // 2
+        pyxel.rect(box_x, box_y, box_w, box_h, 0)
+        pyxel.rectb(box_x, box_y, box_w, box_h, 7)
+
+        result_text = "VICTORY" if self.winner_side == unit_system.Side.PLAYER else "DEFEAT"
+        result_color = 11 if self.winner_side == unit_system.Side.PLAYER else 8
+        self._draw_text(box_x + 48, box_y + 12, result_text, result_color, compact=True)
 
 
 if __name__ == "__main__":
