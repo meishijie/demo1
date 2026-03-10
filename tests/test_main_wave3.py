@@ -18,6 +18,12 @@ class _FakePyxelInput:
     def btnp(self, key: int) -> bool:
         return key in self._pressed_buttons
 
+    def rect(self, *_args, **_kwargs) -> None:
+        return None
+
+    def rectb(self, *_args, **_kwargs) -> None:
+        return None
+
 
 def make_game(units: list[Unit], map_width: int = 10, map_height: int = 10) -> Game:
     game = Game.__new__(Game)
@@ -238,6 +244,72 @@ class MainWave3LogicTests(unittest.TestCase):
         hovered_enemy = game._unit_by_id(game.hovered_unit_id)
         self.assertIsNotNone(hovered_enemy)
         self.assertEqual(hovered_enemy.hp, 90)
+
+    def test_edge_scroll_respects_viewport_edges_and_clamps_camera(self) -> None:
+        units = [Unit(PLAYER_COMMANDER_ID, Side.PLAYER, UnitType.SPEAR, (1, 1), hp=100)]
+        game = make_game(units, map_width=40, map_height=40)
+        game.max_camera_x = 100.0
+        game.max_camera_y = 80.0
+        fake_pyxel = _FakePyxelInput()
+
+        with mock.patch.object(main_module, "pyxel", fake_pyxel):
+            fake_pyxel.mouse_x = -1
+            fake_pyxel.mouse_y = -1
+            game._update_edge_scroll()
+            self.assertEqual(game.camera_x, 0.0)
+            self.assertEqual(game.camera_y, 0.0)
+
+            fake_pyxel.mouse_x = main_module.EDGE_SCROLL_MARGIN - 1
+            fake_pyxel.mouse_y = main_module.EDGE_SCROLL_MARGIN - 1
+            game._update_edge_scroll()
+            self.assertEqual(game.camera_x, 0.0)
+            self.assertEqual(game.camera_y, 0.0)
+
+            game.camera_x = 99.0
+            game.camera_y = 79.0
+            fake_pyxel.mouse_x = main_module.SCREEN_WIDTH - 1
+            fake_pyxel.mouse_y = main_module.SCREEN_HEIGHT - 1
+            game._update_edge_scroll()
+            self.assertEqual(game.camera_x, game.max_camera_x)
+            self.assertEqual(game.camera_y, game.max_camera_y)
+
+    def test_hover_info_uses_compact_layout_near_bottom_bar(self) -> None:
+        units = [
+            Unit(PLAYER_COMMANDER_ID, Side.PLAYER, UnitType.SPEAR, (1, 1), hp=100),
+            Unit(ENEMY_COMMANDER_ID, Side.ENEMY, UnitType.SPEAR, (2, 1), hp=100),
+        ]
+        game = make_game(units)
+        game.hovered_unit_id = ENEMY_COMMANDER_ID
+        fake_pyxel = _FakePyxelInput()
+        fake_pyxel.mouse_x = 120
+        fake_pyxel.mouse_y = main_module.SCREEN_HEIGHT - main_module.BOTTOM_BAR_HEIGHT - 1
+
+        with mock.patch.object(main_module, "pyxel", fake_pyxel):
+            with mock.patch.object(game, "_draw_text") as draw_text:
+                game._draw_hover_unit_info()
+
+        self.assertEqual(draw_text.call_count, 5)
+        self.assertTrue(all(call.kwargs.get("compact") is True for call in draw_text.call_args_list))
+
+    def test_choose_font_prefers_default_for_cjk_and_compact_for_ascii(self) -> None:
+        units = [Unit(PLAYER_COMMANDER_ID, Side.PLAYER, UnitType.SPEAR, (1, 1), hp=100)]
+        game = make_game(units)
+        default_font = object()
+        compact_font = object()
+        game.default_font = default_font
+        game.compact_font = compact_font
+
+        self.assertIs(game._choose_font("阵营: 玩家", compact=True), default_font)
+        self.assertIs(game._choose_font("TURN: PLAYER", compact=True), compact_font)
+        self.assertIs(game._choose_font("TURN: PLAYER", compact=False), default_font)
+
+    def test_choose_font_compact_ascii_falls_back_to_pyxel_default_when_unavailable(self) -> None:
+        units = [Unit(PLAYER_COMMANDER_ID, Side.PLAYER, UnitType.SPEAR, (1, 1), hp=100)]
+        game = make_game(units)
+        game.default_font = None
+        game.compact_font = None
+
+        self.assertIsNone(game._choose_font("TURN: PLAYER", compact=True))
 
 
 if __name__ == "__main__":
