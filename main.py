@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import random
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from enum import IntEnum
 from typing import Iterable
 
@@ -33,6 +33,18 @@ BOTTOM_BAR_HEIGHT = 12
 END_TURN_BUTTON = (SCREEN_WIDTH - 72, 2, 68, 12)
 PLAYER_COMMANDER_ID = "p_lord"
 ENEMY_COMMANDER_ID = "e_lord"
+
+
+@dataclass
+class VFXEffect:
+    x: float
+    y: float
+    type: str  # "text", "flash", "bump"
+    text: str = ""
+    color: int = 7
+    life: int = 20
+    max_life: int = 20
+    vy: float = 0.0  # vertical velocity for floating text
 
 
 class Terrain(IntEnum):
@@ -179,6 +191,17 @@ class Game:
         self.winner_side: unit_system.Side | None = None
         self.status_text = "Player turn: choose a unit"
 
+        # Juiciness additions
+        self.effects: list[VFXEffect] = []
+        self.shake_x = 0
+        self.shake_y = 0
+        self.shake_duration = 0
+        self.animating = False
+        self.combat_queue: list[dict] = []
+        self.move_queue: list[dict] = []
+        self.combat_timer = 0
+        self.unit_offsets: dict[str, tuple[float, float]] = {}
+
         self.default_font, self.compact_font = self._load_fonts()
 
         pyxel.run(self.update, self.draw)
@@ -230,6 +253,14 @@ class Game:
         return lookup
 
     def update(self) -> None:
+        self._update_effects()
+        self._look_update_shake()
+        self._update_combat_animation()
+        self._update_move_animation()
+
+        if self.animating:
+            return
+
         self._update_edge_scroll()
         self._update_hovered_unit()
         if self.game_over or self._check_battle_end():
@@ -240,6 +271,142 @@ class Game:
             return
 
         self._handle_player_input()
+
+    def _add_effect(self, x: float, y: float, eff_type: str, text: str = "", color: int = 7, life: int = 20) -> None:
+        vy = -0.5 if eff_type == "text" else 0.0
+        self.effects.append(VFXEffect(x=x, y=y, type=eff_type, text=text, color=color, life=life, max_life=life, vy=vy))
+
+    def _update_effects(self) -> None:
+        for i in range(len(self.effects) - 1, -1, -1):
+            eff = self.effects[i]
+            eff.life -= 1
+            eff.y += eff.vy
+            if eff.life <= 0:
+                self.effects.pop(i)
+
+    def _trigger_shake(self, duration: int = 8) -> None:
+        self.shake_duration = duration
+
+    def _look_update_shake(self) -> None:
+        if self.shake_duration > 0:
+            self.shake_x = random.randint(-4, 4)
+            self.shake_y = random.randint(-4, 4)
+            self.shake_duration -= 1
+        else:
+            self.shake_x = 0
+            self.shake_y = 0
+
+    def _update_move_animation(self) -> None:
+        if not self.move_queue:
+            return
+
+        self.combat_timer += 1
+        curr = self.move_queue[0]
+        unit_id = curr["unit_id"]
+        start_tile = curr["start_tile"]
+        target_tile = curr["target_tile"]
+
+        # Duration 10 frames
+        duration = 10
+        if self.combat_timer <= duration:
+            t = self.combat_timer / duration
+            # Interpolate in pixels relative to center of start_tile
+            dx = (target_tile[0] - start_tile[0]) * TILE_SIZE * t
+            dy = (target_tile[1] - start_tile[1]) * TILE_SIZE * t
+            self.unit_offsets[unit_id] = (dx, dy)
+        else:
+            # End of move
+            self.unit_offsets[unit_id] = (0, 0)
+            unit = self._unit_by_id(unit_id)
+            if unit:
+                self._replace_unit(replace(unit, position=target_tile))
+
+            self.move_queue.pop(0)
+            self.combat_timer = 0
+            if not self.move_queue:
+                self.animating = False
+                # Callback logic for turn switching or battle checks
+                if curr.get("is_enemy"):
+                    pass # Enemy turn countdown handles next
+                else:
+                    self._auto_switch_turn_if_needed()
+
+    def _update_combat_animation(self) -> None:
+        if not self.combat_queue:
+            return
+
+        self.combat_timer += 1
+        curr = self.combat_queue[0]
+
+        # Phase 1: Bump (Frames 0-6)
+        if 1 <= self.combat_timer <= 6:
+            attacker = curr["attacker"]
+            defender = curr["defender"]
+            # Direction vector
+            dx = defender.position[0] - attacker.position[0]
+            dy = defender.position[1] - attacker.position[1]
+            dist = (dx**2 + dy**2)**0.5
+            if dist > 0:
+                # Move slightly towards target
+                strength = 6.0 * (self.combat_timer / 6.0)
+                self.unit_offsets[attacker.unit_id] = (dx / dist * strength, dy / dist * strength)
+        elif 7 <= self.combat_timer <= 12:
+            attacker = curr["attacker"]
+            # Back to normal soon
+            self.unit_offsets[attacker.unit_id] = (0, 0)
+
+        # Phase 2: Impact (Frame 7)
+        if self.combat_timer == 7:
+            attacker = curr["attacker"]
+            defender = curr["defender"]
+            damage = curr["damage"]
+            is_dead = curr["is_dead"]
+
+            # Visual Feedback
+            sx, sy = self._map_to_screen_pixel(defender.position[0], defender.position[1])
+            self._add_effect(sx, sy, "flash", life=6)
+            self._trigger_shake(10)
+
+            # Floating text
+            txt = f"-{damage}" if damage > 0 else "BLOCK"
+            col = 8 if damage > 0 else 7
+            self._add_effect(sx + 4, sy - 8, "text", text=txt, color=col, life=30)
+
+            # Apply Logic
+            if is_dead:
+                self._remove_unit(defender.unit_id)
+            else:
+                self._replace_unit(replace(defender, hp=max(0, defender.hp - damage)))
+
+        # Phase 3: Finish (Frame 20)
+        if self.combat_timer >= 20:
+            self.unit_offsets.clear()
+            self.combat_queue.pop(0)
+            self.combat_timer = 0
+            if not self.combat_queue:
+                self.animating = False
+                self._auto_switch_turn_if_needed()
+
+    def _apply_attack(self, attacker: "unit_system.Unit", defender: "unit_system.Unit") -> None:
+        defender_terrain = unit_system.TerrainType(
+            self.terrain_map[defender.position[1]][defender.position[0]].name.lower()
+        )
+        preview = unit_system.preview_combat(attacker, defender, defender_terrain)
+        damage = preview.predicted_damage
+        is_dead = (defender.hp - damage) <= 0
+
+        self.combat_timer = 0
+        self.combat_queue.append({
+            "attacker": attacker,
+            "defender": defender,
+            "damage": damage,
+            "is_dead": is_dead
+        })
+
+        if is_dead:
+            self.status_text = f"{attacker.unit_id} defeated {defender.unit_id}!"
+        else:
+            self.status_text = f"{attacker.unit_id} hit {defender.unit_id} for {damage}"
 
     def _update_enemy_turn(self) -> None:
         if self.enemy_turn_countdown > 0:
@@ -329,7 +496,15 @@ class Game:
             self.status_text = f"{enemy_unit.unit_id} holds position"
             return False
 
-        self._replace_unit(replace(enemy_unit, position=best_tile))
+        self.combat_timer = 0
+        self.move_queue.append({
+            "unit_id": enemy_unit.unit_id,
+            "start_tile": enemy_unit.position,
+            "target_tile": best_tile,
+            "is_enemy": True
+        })
+        self.animating = True
+
         self.status_text = f"{enemy_unit.unit_id} advanced to {best_tile}"
         return True
 
@@ -401,37 +576,32 @@ class Game:
         self.status_text = f"{unit.unit_id}: choose move or attack"
 
     def _execute_move(self, unit: "unit_system.Unit", target: tuple[int, int]) -> None:
-        self._replace_unit(replace(unit, position=target))
         self.acted_unit_ids.add(unit.unit_id)
-        self.status_text = f"{unit.unit_id} moved to {target}"
+        self.status_text = f"{unit.unit_id} moving to {target}"
+
+        self.animating = True
+        self.combat_timer = 0
+        self.move_queue.append({
+            "unit_id": unit.unit_id,
+            "start_tile": unit.position,
+            "target_tile": target,
+            "is_enemy": False
+        })
+
         self._clear_selection()
-        self._auto_switch_turn_if_needed()
 
     def _execute_attack(self, attacker: "unit_system.Unit", defender: "unit_system.Unit") -> None:
         self._apply_attack(attacker, defender)
         self.acted_unit_ids.add(attacker.unit_id)
         self._clear_selection()
-        if self._check_battle_end():
-            return
-        self._auto_switch_turn_if_needed()
+        # Turn switching is now handled by animation end if animating
+        if not self.animating:
+            self._auto_switch_turn_if_needed()
 
-    def _apply_attack(self, attacker: "unit_system.Unit", defender: "unit_system.Unit") -> None:
-        defender_terrain = unit_system.TerrainType(
-            self.terrain_map[defender.position[1]][defender.position[0]].name.lower()
-        )
-        preview = unit_system.preview_combat(attacker, defender, defender_terrain)
-        next_hp = max(0, defender.hp - preview.predicted_damage)
-        if next_hp == 0:
-            self._remove_unit(defender.unit_id)
-            self.status_text = (
-                f"{attacker.unit_id} dealt {preview.predicted_damage} and defeated {defender.unit_id}"
-            )
-        else:
-            self._replace_unit(replace(defender, hp=next_hp))
-            self.status_text = f"{attacker.unit_id} dealt {preview.predicted_damage} to {defender.unit_id}"
+    # REMOVE duplicate _apply_attack below (Old implementation)
 
     def _auto_switch_turn_if_needed(self) -> None:
-        if self.game_over:
+        if self.game_over or self.current_turn != unit_system.Side.PLAYER:
             return
         if has_unacted_units(self.units, unit_system.Side.PLAYER, self.acted_unit_ids):
             return
@@ -507,7 +677,7 @@ class Game:
         return None
 
     def _map_to_screen_pixel(self, map_x: int, map_y: int) -> tuple[int, int]:
-        return map_x * TILE_SIZE - int(self.camera_x), map_y * TILE_SIZE - int(self.camera_y)
+        return map_x * TILE_SIZE - int(self.camera_x + self.shake_x), map_y * TILE_SIZE - int(self.camera_y + self.shake_y)
 
     def _update_hovered_unit(self) -> None:
         hovered_tile = self._screen_to_map_tile(pyxel.mouse_x, pyxel.mouse_y)
@@ -546,10 +716,14 @@ class Game:
     def draw(self) -> None:
         pyxel.cls(0)
 
-        start_tile_x = int(self.camera_x // TILE_SIZE)
-        start_tile_y = int(self.camera_y // TILE_SIZE)
-        offset_x = -int(self.camera_x % TILE_SIZE)
-        offset_y = -int(self.camera_y % TILE_SIZE)
+        # Apply screen shake to coordinates
+        cam_x = self.camera_x + self.shake_x
+        cam_y = self.camera_y + self.shake_y
+
+        start_tile_x = int(cam_x // TILE_SIZE)
+        start_tile_y = int(cam_y // TILE_SIZE)
+        offset_x = -int(cam_x % TILE_SIZE)
+        offset_y = -int(cam_y % TILE_SIZE)
 
         for screen_ty in range(VISIBLE_TILES_Y + 2):
             map_y = start_tile_y + screen_ty
@@ -571,7 +745,17 @@ class Game:
         self._draw_top_bar()
         self._draw_bottom_bar()
         self._draw_hover_unit_info()
+        self._draw_effects()
         self._draw_battle_result()
+
+    def _draw_effects(self) -> None:
+        for eff in self.effects:
+            if eff.type == "text":
+                self._draw_text(int(eff.x), int(eff.y), eff.text, eff.color, compact=True)
+            elif eff.type == "flash":
+                # Flicker effect based on life
+                if (eff.life // 2) % 2 == 0:
+                    pyxel.rect(int(eff.x), int(eff.y), TILE_SIZE, TILE_SIZE, 7)
 
     def _draw_action_candidates(self) -> None:
         for map_x, map_y in self.move_candidates:
@@ -589,6 +773,12 @@ class Game:
     def _draw_units(self) -> None:
         for unit in self.units:
             sx, sy = self._map_to_screen_pixel(unit.position[0], unit.position[1])
+
+            # Apply unit-specific animation offset
+            ox, oy = self.unit_offsets.get(unit.unit_id, (0, 0))
+            sx += int(ox)
+            sy += int(oy)
+
             if sx <= -TILE_SIZE or sy <= -TILE_SIZE or sx >= SCREEN_WIDTH or sy >= SCREEN_HEIGHT:
                 continue
 
