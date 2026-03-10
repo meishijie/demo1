@@ -5,6 +5,7 @@ from unit_system import (
     TerrainType,
     Unit,
     UnitType,
+    can_unit_enter_tile,
     can_move_to,
     counter_multiplier,
     get_unit_stats,
@@ -45,6 +46,24 @@ class UnitSystemTests(unittest.TestCase):
         self.assertEqual(movement_cost(UnitType.CAVALRY, TerrainType.PLAIN), 1)
         self.assertEqual(movement_cost(UnitType.CAVALRY, TerrainType.FOREST), 2)
         self.assertEqual(movement_cost(UnitType.SPEAR, TerrainType.FOREST), 1)
+
+    def test_can_unit_enter_tile_contract_with_river_and_sea(self) -> None:
+        self.assertTrue(can_unit_enter_tile(terrain="plain", unit_type="spear"))
+        self.assertFalse(can_unit_enter_tile(terrain="river", unit_type="spear"))
+        self.assertFalse(can_unit_enter_tile(terrain="sea", unit_type="archer"))
+        self.assertFalse(can_unit_enter_tile(terrain=TerrainType.RIVER, unit_type=UnitType.CAVALRY))
+
+    def test_reachable_tiles_respects_impassable_river_and_sea(self) -> None:
+        player = Unit("p1", Side.PLAYER, UnitType.SPEAR, (1, 1))
+        units = [player]
+        terrain_map = {
+            (2, 1): TerrainType.RIVER,
+            (1, 2): TerrainType.SEA,
+        }
+
+        result = reachable_tiles(player, units, terrain_map=terrain_map, map_width=4, map_height=4)
+        self.assertNotIn((2, 1), result)
+        self.assertNotIn((1, 2), result)
 
     def test_zoc_blocks_zoc_to_zoc_transition(self) -> None:
         player = Unit("p1", Side.PLAYER, UnitType.SPEAR, (1, 2))

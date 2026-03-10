@@ -22,6 +22,8 @@ class UnitType(str, Enum):
 class TerrainType(str, Enum):
     PLAIN = "plain"
     FOREST = "forest"
+    RIVER = "river"
+    SEA = "sea"
 
 
 @dataclass(frozen=True)
@@ -67,6 +69,7 @@ COUNTER_DISADVANTAGE_MULTIPLIER = 0.75
 
 FOREST_DEFENSE_BONUS = 2
 CAVALRY_FOREST_MOVE_PENALTY = 1
+IMPASSABLE_TERRAINS: set[TerrainType] = {TerrainType.RIVER, TerrainType.SEA}
 
 
 def get_unit_stats(unit_type: UnitType) -> UnitStats:
@@ -92,6 +95,24 @@ def movement_cost(unit_type: UnitType, terrain: TerrainType) -> int:
     if unit_type is UnitType.CAVALRY and terrain is TerrainType.FOREST:
         cost += CAVALRY_FOREST_MOVE_PENALTY
     return cost
+
+
+def can_unit_enter_tile(
+    terrain: TerrainType | str,
+    unit_type: UnitType | str | None = None,
+) -> bool:
+    # unit_type is reserved for future per-unit passability rules.
+    _ = unit_type
+
+    if isinstance(terrain, TerrainType):
+        terrain_type = terrain
+    else:
+        try:
+            terrain_type = TerrainType(str(terrain).lower())
+        except ValueError:
+            return True
+
+    return terrain_type not in IMPASSABLE_TERRAINS
 
 
 def preview_combat(attacker: Unit, defender: Unit, defender_terrain: TerrainType) -> CombatPreview:
@@ -157,7 +178,11 @@ def reachable_tiles(
             if nxt in occupied:
                 continue
 
-            step_cost = movement_cost(unit.unit_type, terrain_map.get(nxt, TerrainType.PLAIN))
+            terrain = terrain_map.get(nxt, TerrainType.PLAIN)
+            if not can_unit_enter_tile(terrain=terrain, unit_type=unit.unit_type):
+                continue
+
+            step_cost = movement_cost(unit.unit_type, terrain)
             new_remaining = remaining_mp - step_cost
             if new_remaining < 0:
                 continue
