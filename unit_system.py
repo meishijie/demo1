@@ -17,6 +17,9 @@ class UnitType(str, Enum):
     SPEAR = "spear"
     CAVALRY = "cavalry"
     ARCHER = "archer"
+    MAGE = "mage"
+    HEALER = "healer"
+    SLIME = "slime"
 
 
 class TerrainType(str, Enum):
@@ -24,6 +27,7 @@ class TerrainType(str, Enum):
     FOREST = "forest"
     RIVER = "river"
     SEA = "sea"
+    FIRE = "fire"
 
 
 @dataclass(frozen=True)
@@ -49,13 +53,16 @@ class CombatPreview:
     attacker_multiplier: float
     defender_defense_bonus: int
     predicted_damage: int
-
+    knockback_dist: int = 0
 
 BASE_UNIT_STATS: dict[UnitType, UnitStats] = {
     UnitType.SPEAR: UnitStats(attack=24, defense=14, movement=3, min_range=1, max_range=1),
     UnitType.CAVALRY: UnitStats(attack=28, defense=12, movement=5, min_range=1, max_range=1),
     UnitType.ARCHER: UnitStats(attack=20, defense=10, movement=3, min_range=2, max_range=3),
-}
+    UnitType.MAGE: UnitStats(attack=30, defense=5, movement=2, min_range=1, max_range=2),
+    UnitType.HEALER: UnitStats(attack=5, defense=5, movement=3, min_range=1, max_range=2),
+    UnitType.SLIME: UnitStats(attack=18, defense=8, movement=2, min_range=1, max_range=1),
+} # attack is used for healing power
 
 # 枪克骑、骑克弓、弓克枪
 COUNTER_RELATIONSHIPS: set[tuple[UnitType, UnitType]] = {
@@ -116,17 +123,54 @@ def can_unit_enter_tile(
     return terrain_type not in IMPASSABLE_TERRAINS
 
 
-def preview_combat(attacker: Unit, defender: Unit, defender_terrain: TerrainType) -> CombatPreview:
+def get_aura_bonus(unit: Unit, units: Sequence[Unit]) -> int:
+    """Check if the unit is near a friendly Lord commander and gets attack bonus."""
+    bonus = 0
+    for other in units:
+        if other.side == unit.side and "lord" in other.unit_id and other.unit_id != unit.unit_id:
+            distance = abs(unit.position[0] - other.position[0]) + abs(unit.position[1] - other.position[1])
+            if distance <= 2:
+                bonus = 6  # +6 Attack from Aura
+                break
+    return bonus
+
+def preview_combat(attacker: Unit, defender: Unit, defender_terrain: TerrainType, all_units: Sequence[Unit] = ()) -> CombatPreview:
+    if attacker.unit_type == UnitType.HEALER:
+        # For healer, predict heal amount!
+        heal_power = get_unit_stats(attacker.unit_type).attack
+        return CombatPreview(attacker_multiplier=1.0, defender_defense_bonus=0, predicted_damage=-heal_power)
+
     attacker_stats = get_unit_stats(attacker.unit_type)
     defender_stats = get_unit_stats(defender.unit_type)
     multiplier = counter_multiplier(attacker.unit_type, defender.unit_type)
-    defense_bonus = terrain_defense_bonus(defender_terrain)
-    raw_damage = attacker_stats.attack * multiplier - (defender_stats.defense + defense_bonus)
+    
+    # Mage ignores terrain defense
+    defense_bonus = 0 if attacker.unit_type == UnitType.MAGE else terrain_defense_bonus(defender_terrain)
+    
+    # Commander Aura Bonus
+    aura_bonus = get_aura_bonus(attacker, all_units)
+
+    raw_damage = (attacker_stats.attack + aura_bonus) * multiplier - (defender_stats.defense + defense_bonus)
+    # Give Mage intrinsic magic advantage: less variance with physical defense
+    if attacker.unit_type == UnitType.MAGE:
+        # Ignore half of physical defense roughly by adding pen
+        raw_damage += defender_stats.defense // 2
+
     predicted_damage = max(1, int(round(raw_damage)))
+    
+    distance = abs(attacker.position[0] - defender.position[0]) + abs(attacker.position[1] - defender.position[1])
+    knockback = 0
+    if distance == 1:
+        if attacker.unit_type == UnitType.CAVALRY:
+            knockback = 2
+        elif attacker.unit_type == UnitType.SPEAR:
+            knockback = 1
+
     return CombatPreview(
         attacker_multiplier=multiplier,
         defender_defense_bonus=defense_bonus,
         predicted_damage=predicted_damage,
+        knockback_dist=knockback,
     )
 
 
@@ -165,7 +209,7 @@ def reachable_tiles(
     map_height: int,
 ) -> set[Coord]:
     stats = get_unit_stats(unit.unit_type)
-    occupied = {other.position for other in units if other.unit_id != unit.unit_id}
+    occupied = {other.position for other in units if other.side != unit.side and other.unit_id != unit.unit_id}
     enemy_zoc = build_enemy_zoc(units, side=unit.side, map_width=map_width, map_height=map_height)
 
     best_remaining_mp: dict[Coord, int] = {unit.position: stats.movement}
