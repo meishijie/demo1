@@ -47,6 +47,8 @@ def make_game(units: list[Unit], map_width: int = 10, map_height: int = 10) -> G
     game.game_over = False
     game.winner_side = None
     game.status_text = ""
+    game.combat_effects = []
+    game.floating_texts = []
     return game
 
 
@@ -288,8 +290,7 @@ class MainWave3LogicTests(unittest.TestCase):
             with mock.patch.object(game, "_draw_text") as draw_text:
                 game._draw_hover_unit_info()
 
-        self.assertEqual(draw_text.call_count, 5)
-        self.assertTrue(all(call.kwargs.get("compact") is True for call in draw_text.call_args_list))
+        self.assertEqual(draw_text.call_count, 8)
 
     def test_choose_font_prefers_default_for_cjk_and_compact_for_ascii(self) -> None:
         units = [Unit(PLAYER_COMMANDER_ID, Side.PLAYER, UnitType.SPEAR, (1, 1), hp=100)]

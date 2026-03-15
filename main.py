@@ -28,11 +28,17 @@ EDGE_SCROLL_MARGIN = 12
 SCROLL_SPEED = 2.6
 ENEMY_TURN_DELAY_FRAMES = 26
 
-TOP_BAR_HEIGHT = 16
-BOTTOM_BAR_HEIGHT = 12
-END_TURN_BUTTON = (SCREEN_WIDTH - 72, 2, 68, 12)
+TOP_BAR_HEIGHT = 18
+BOTTOM_BAR_HEIGHT = 14
+END_TURN_BUTTON = (SCREEN_WIDTH - 76, 3, 70, 12)
 PLAYER_COMMANDER_ID = "p_lord"
 ENEMY_COMMANDER_ID = "e_lord"
+
+
+class GameState(IntEnum):
+    TITLE = 0
+    PLAYING = 1
+    GAME_OVER = 2
 
 
 class Terrain(IntEnum):
@@ -40,6 +46,7 @@ class Terrain(IntEnum):
     FOREST = 1
     RIVER = 2
     SEA = 3
+    FIRE = 4
 
 
 TERRAIN_COLOR = {
@@ -47,6 +54,7 @@ TERRAIN_COLOR = {
     Terrain.FOREST: 11,
     Terrain.RIVER: 12,
     Terrain.SEA: 1,
+    Terrain.FIRE: 9,
 }
 
 IMPASSABLE_TERRAIN = {Terrain.RIVER, Terrain.SEA}
@@ -179,7 +187,13 @@ class Game:
         self.winner_side: unit_system.Side | None = None
         self.status_text = "Player turn: choose a unit"
 
+        self.game_state = GameState.TITLE
+        self.title_frame = 0
+
         self.default_font, self.compact_font = self._load_fonts()
+
+        self.combat_effects: list[dict] = []
+        self.floating_texts: list[dict] = []
 
         pyxel.run(self.update, self.draw)
 
@@ -212,6 +226,13 @@ class Game:
     def _draw_text(self, x: int, y: int, text: str, color: int, compact: bool = False) -> None:
         pyxel.text(x, y, text, color, self._choose_font(text, compact=compact))
 
+    def _draw_text_shadowed(self, x: int, y: int, text: str, color: int, shadow_color: int = 0, compact: bool = False) -> None:
+        try:
+            self._draw_text(x + 1, y + 1, text, shadow_color, compact)
+        except Exception:
+            pass
+        self._draw_text(x, y, text, color, compact)
+
     def _create_initial_units(self) -> list["unit_system.Unit"]:
         return [
             unit_system.Unit("p_lord", unit_system.Side.PLAYER, unit_system.UnitType.SPEAR, (4, 6), hp=100),
@@ -230,6 +251,18 @@ class Game:
         return lookup
 
     def update(self) -> None:
+        if self.game_state == GameState.TITLE:
+            self.title_frame += 1
+            if pyxel.btnp(pyxel.MOUSE_BUTTON_LEFT) or pyxel.btnp(pyxel.KEY_RETURN):
+                self.game_state = GameState.PLAYING
+            return
+
+        if self.game_over:
+            if pyxel.btnp(pyxel.MOUSE_BUTTON_LEFT) or pyxel.btnp(pyxel.KEY_RETURN):
+                self._restart_game()
+            return
+
+        self._update_combat_effects()
         self._update_edge_scroll()
         self._update_hovered_unit()
         if self.game_over or self._check_battle_end():
@@ -240,6 +273,36 @@ class Game:
             return
 
         self._handle_player_input()
+
+    def _restart_game(self) -> None:
+        self.units = self._create_initial_units()
+        self.current_turn = unit_system.Side.PLAYER
+        self.acted_unit_ids.clear()
+        self.enemy_acted_unit_ids.clear()
+        self.selected_unit_id = None
+        self.move_candidates.clear()
+        self.attack_candidates.clear()
+        self.hovered_unit_id = None
+        self.enemy_turn_countdown = 0
+        self.game_over = False
+        self.winner_side = None
+        self.status_text = "Player turn: choose a unit"
+        self.combat_effects.clear()
+        self.floating_texts.clear()
+        self.camera_x = 0.0
+        self.camera_y = 0.0
+
+    def _update_combat_effects(self) -> None:
+        for effect in self.combat_effects[:]:
+            effect["frames_remaining"] -= 1
+            if effect["frames_remaining"] <= 0:
+                self.combat_effects.remove(effect)
+
+        for ft in self.floating_texts[:]:
+            ft["frames_remaining"] -= 1
+            ft["y"] -= 0.5
+            if ft["frames_remaining"] <= 0:
+                self.floating_texts.remove(ft)
 
     def _update_enemy_turn(self) -> None:
         if self.enemy_turn_countdown > 0:
@@ -420,13 +483,38 @@ class Game:
             self.terrain_map[defender.position[1]][defender.position[0]].name.lower()
         )
         resolution = unit_system.resolve_combat(attacker, defender, defender_terrain)
+
+        self.combat_effects.append({
+            "type": "attack_flash",
+            "target_pos": defender.position,
+            "frames_remaining": 5,
+        })
+
+        self.floating_texts.append({
+            "text": f"-{resolution.predicted_damage}",
+            "x": defender.position[0] * TILE_SIZE + TILE_SIZE // 2,
+            "y": defender.position[1] * TILE_SIZE,
+            "frames_remaining": 30,
+            "color": 9,
+        })
+
         if resolution.defender_defeated:
             self._remove_unit(defender.unit_id)
+            self.combat_effects.append({
+                "type": "defeat_burst",
+                "target_pos": defender.position,
+                "frames_remaining": 20,
+            })
             self.status_text = (
                 f"{attacker.unit_id} dealt {resolution.predicted_damage} and defeated {defender.unit_id}"
             )
         else:
             self._replace_unit(replace(defender, hp=resolution.defender_next_hp))
+            self.combat_effects.append({
+                "type": "hit_shake",
+                "target_pos": defender.position,
+                "frames_remaining": 8,
+            })
             self.status_text = (
                 f"{attacker.unit_id} dealt {resolution.predicted_damage} to {defender.unit_id}"
             )
@@ -501,6 +589,8 @@ class Game:
         self.attack_candidates.clear()
 
     def _screen_to_map_tile(self, screen_x: int, screen_y: int) -> tuple[int, int] | None:
+        if screen_y < TOP_BAR_HEIGHT or screen_y >= SCREEN_HEIGHT - BOTTOM_BAR_HEIGHT:
+            return None
         map_x = int((screen_x + self.camera_x) // TILE_SIZE)
         map_y = int((screen_y + self.camera_y) // TILE_SIZE)
         if 0 <= map_x < self.map_width and 0 <= map_y < self.map_height:
@@ -545,6 +635,10 @@ class Game:
         self.camera_y = min(max(self.camera_y, 0.0), self.max_camera_y)
 
     def draw(self) -> None:
+        if self.game_state == GameState.TITLE:
+            self._draw_title_screen()
+            return
+
         pyxel.cls(0)
 
         start_tile_x = int(self.camera_x // TILE_SIZE)
@@ -569,6 +663,8 @@ class Game:
 
         self._draw_action_candidates()
         self._draw_units()
+        self._draw_combat_effects()
+        self._draw_floating_text()
         self._draw_top_bar()
         self._draw_bottom_bar()
         self._draw_hover_unit_info()
@@ -579,13 +675,15 @@ class Game:
             sx, sy = self._map_to_screen_pixel(map_x, map_y)
             if sx <= -TILE_SIZE or sy <= -TILE_SIZE or sx >= SCREEN_WIDTH or sy >= SCREEN_HEIGHT:
                 continue
-            pyxel.rectb(sx + 1, sy + 1, TILE_SIZE - 2, TILE_SIZE - 2, 10)
+            pyxel.rect(sx + 2, sy + 2, TILE_SIZE - 4, TILE_SIZE - 4, 11)
+            pyxel.rectb(sx + 1, sy + 1, TILE_SIZE - 2, TILE_SIZE - 2, 11)
 
         for map_x, map_y in self.attack_candidates:
             sx, sy = self._map_to_screen_pixel(map_x, map_y)
             if sx <= -TILE_SIZE or sy <= -TILE_SIZE or sx >= SCREEN_WIDTH or sy >= SCREEN_HEIGHT:
                 continue
-            pyxel.rectb(sx + 2, sy + 2, TILE_SIZE - 4, TILE_SIZE - 4, 8)
+            pyxel.rectb(sx + 1, sy + 1, TILE_SIZE - 2, TILE_SIZE - 2, 9)
+            pyxel.rectb(sx + 2, sy + 2, TILE_SIZE - 4, TILE_SIZE - 4, 9)
 
     def _draw_units(self) -> None:
         for unit in self.units:
@@ -593,36 +691,87 @@ class Game:
             if sx <= -TILE_SIZE or sy <= -TILE_SIZE or sx >= SCREEN_WIDTH or sy >= SCREEN_HEIGHT:
                 continue
 
-            color = 10 if unit.side == unit_system.Side.PLAYER else 8
-            if unit.side == unit_system.Side.PLAYER and unit.unit_id in self.acted_unit_ids:
-                color = 5
+            is_player = unit.side == unit_system.Side.PLAYER
+            is_acted = unit.unit_id in self.acted_unit_ids or unit.unit_id in self.enemy_acted_unit_ids
 
-            pyxel.rect(sx + 2, sy + 2, TILE_SIZE - 4, TILE_SIZE - 4, color)
+            if is_acted:
+                base_color = 5
+            else:
+                base_color = 3 if is_player else 2
+
+            pyxel.rect(sx + 2, sy + 2, TILE_SIZE - 4, TILE_SIZE - 4, base_color)
             pyxel.rectb(sx + 2, sy + 2, TILE_SIZE - 4, TILE_SIZE - 4, 0)
 
-            unit_mark = unit.unit_type.value[0].upper()
-            pyxel.text(sx + 6, sy + 5, unit_mark, 7)
+            unit_type = unit.unit_type
+            if unit_type == unit_system.UnitType.SPEAR:
+                pyxel.line(sx + 8, sy + 3, sx + 4, sy + 10, 7)
+                pyxel.line(sx + 8, sy + 3, sx + 12, sy + 10, 7)
+                pyxel.line(sx + 4, sy + 10, sx + 12, sy + 10, 7)
+            elif unit_type == unit_system.UnitType.CAVALRY:
+                pyxel.rect(sx + 4, sy + 4, 8, 6, 7)
+                pyxel.rect(sx + 5, sy + 3, 2, 2, 7)
+                pyxel.rect(sx + 9, sy + 3, 2, 2, 7)
+            elif unit_type == unit_system.UnitType.ARCHER:
+                pyxel.line(sx + 8, sy + 3, sx + 5, sy + 11, 7)
+                pyxel.line(sx + 8, sy + 3, sx + 11, sy + 11, 7)
+                pyxel.pset(sx + 8, sy + 3, 7)
+
+            hp_bar_width = 10
+            hp_bar_height = 2
+            hp_ratio = max(0, unit.hp / 100)
+            hp_color = 11 if hp_ratio > 0.5 else (10 if hp_ratio > 0.25 else 8)
+            pyxel.rect(sx + 3, sy + 13, hp_bar_width, hp_bar_height, 0)
+            pyxel.rect(sx + 3, sy + 13, int(hp_bar_width * hp_ratio), hp_bar_height, hp_color)
+
+            if not is_acted and is_player:
+                pyxel.pset(sx + 13, sy + 2, 11)
 
             if unit.unit_id == self.selected_unit_id:
-                pyxel.rectb(sx, sy, TILE_SIZE, TILE_SIZE, 7)
+                pulse = 7 if (pyxel.frame_count // 6) % 2 == 0 else 0
+                pyxel.rectb(sx - 1, sy - 1, TILE_SIZE + 2, TILE_SIZE + 2, pulse)
 
     def _draw_top_bar(self) -> None:
         pyxel.rect(0, 0, SCREEN_WIDTH, TOP_BAR_HEIGHT, 0)
+        pyxel.rect(0, TOP_BAR_HEIGHT - 2, SCREEN_WIDTH, 2, 5)
+
+        accent_color = 5
+        for i in range(0, SCREEN_WIDTH, 8):
+            pyxel.rect(i, TOP_BAR_HEIGHT - 2, 2, 2, accent_color if i % 16 == 0 else 3)
+
         if self.game_over:
             turn_text = "BATTLE END"
+            turn_color = 7
         else:
-            turn_text = "TURN: PLAYER" if self.current_turn == unit_system.Side.PLAYER else "TURN: ENEMY"
-        self._draw_text(4, 4, turn_text, 7, compact=True)
+            turn_text = "PLAYER" if self.current_turn == unit_system.Side.PLAYER else "ENEMY"
+            turn_color = 3 if self.current_turn == unit_system.Side.PLAYER else 2
+
+        self._draw_text(4, 4, "TURN:", 6, compact=True)
+        self._draw_text_shadowed(32, 4, turn_text, turn_color, shadow_color=0, compact=True)
+
+        if self.current_turn == unit_system.Side.PLAYER and not self.game_over:
+            pyxel.rect(4, 13, 26, 3, 3)
 
         button_x, button_y, button_w, button_h = END_TURN_BUTTON
-        button_color = 2 if (self.current_turn == unit_system.Side.PLAYER and not self.game_over) else 5
+        button_hovered = self._is_mouse_on_end_turn_button(pyxel.mouse_x, pyxel.mouse_y)
+        if self.current_turn == unit_system.Side.PLAYER and not self.game_over:
+            button_color = 10 if button_hovered else 2
+            text_color = 0 if button_hovered else 7
+        else:
+            button_color = 5
+            text_color = 6
         pyxel.rect(button_x, button_y, button_w, button_h, button_color)
         pyxel.rectb(button_x, button_y, button_w, button_h, 7)
-        self._draw_text(button_x + 8, button_y + 3, "End Turn", 7, compact=True)
+        self._draw_text_shadowed(button_x + 8, button_y + 3, "End Turn", text_color, shadow_color=0, compact=True)
 
     def _draw_bottom_bar(self) -> None:
         pyxel.rect(0, SCREEN_HEIGHT - BOTTOM_BAR_HEIGHT, SCREEN_WIDTH, BOTTOM_BAR_HEIGHT, 0)
-        self._draw_text(4, SCREEN_HEIGHT - 9, self.status_text[:56], 7, compact=True)
+        pyxel.rect(0, SCREEN_HEIGHT - BOTTOM_BAR_HEIGHT, SCREEN_WIDTH, 2, 5)
+
+        for i in range(0, SCREEN_WIDTH, 8):
+            pyxel.rect(i, SCREEN_HEIGHT - BOTTOM_BAR_HEIGHT + 12, 2, 2, 3 if i % 16 == 0 else 1)
+
+        status_y = SCREEN_HEIGHT - 10
+        self._draw_text(4, status_y, self.status_text[:52], 7, compact=True)
 
     def _draw_hover_unit_info(self) -> None:
         unit = self._unit_by_id(self.hovered_unit_id)
@@ -630,56 +779,158 @@ class Game:
             return
 
         stats = unit_system.get_unit_stats(unit.unit_type)
-        side_label = "玩家" if unit.side == unit_system.Side.PLAYER else "敌军"
-        lines = [
-            f"阵营: {side_label}",
-            f"兵种: {unit.unit_type.value}",
-            f"HP: {unit.hp}",
-            f"ATK/DEF: {stats.attack}/{stats.defense}",
-            f"MOV/RNG: {stats.movement} {stats.min_range}-{stats.max_range}",
-        ]
+        is_player = unit.side == unit_system.Side.PLAYER
+        side_label = "PLAYER" if is_player else "ENEMY"
+        unit_type_label = unit.unit_type.value.upper()
 
-        box_w = 142
-        box_h = 66
-        box_x = min(max(pyxel.mouse_x + 8, 2), SCREEN_WIDTH - box_w - 2)
-        box_y = min(max(pyxel.mouse_y + 8, TOP_BAR_HEIGHT + 1), SCREEN_HEIGHT - box_h - BOTTOM_BAR_HEIGHT)
+        box_w = 120
+        box_h = 54
+        box_x = min(max(pyxel.mouse_x + 12, 2), SCREEN_WIDTH - box_w - 2)
+        box_y = min(max(pyxel.mouse_y + 12, TOP_BAR_HEIGHT + 2), SCREEN_HEIGHT - box_h - BOTTOM_BAR_HEIGHT)
 
-        compact = box_y + box_h >= SCREEN_HEIGHT - BOTTOM_BAR_HEIGHT - 2
-
-        pyxel.rect(box_x, box_y, box_w, box_h, 1)
+        pyxel.rect(box_x, box_y, box_w, box_h, 0)
         pyxel.rectb(box_x, box_y, box_w, box_h, 7)
-        for i, line in enumerate(lines):
-            self._draw_text(box_x + 4, box_y + 4 + i * 11, line, 7, compact=compact)
+
+        header_color = 3 if is_player else 2
+        self._draw_text_shadowed(box_x + 4, box_y + 3, f"[{side_label}]", header_color, shadow_color=0, compact=True)
+
+        self._draw_text(box_x + 4, box_y + 14, f"TYPE:{unit_type_label}", 6, compact=True)
+        self._draw_text(box_x + 72, box_y + 14, f"HP:{unit.hp}", 10 if unit.hp > 30 else 8, compact=True)
+
+        self._draw_text(box_x + 4, box_y + 24, f"ATK:{stats.attack}", 8, compact=True)
+        self._draw_text(box_x + 48, box_y + 24, f"DEF:{stats.defense}", 6, compact=True)
+        self._draw_text(box_x + 88, box_y + 24, f"MOV:{stats.movement}", 11, compact=True)
+
+        range_text = f"RNG:{stats.min_range}-{stats.max_range}"
+        self._draw_text(box_x + 4, box_y + 34, range_text, 12 if stats.max_range > 1 else 6, compact=True)
+
+        if unit.unit_id in self.acted_unit_ids or unit.unit_id in self.enemy_acted_unit_ids:
+            self._draw_text(box_x + 70, box_y + 34, "[ACTED]", 5, compact=True)
 
     def _draw_terrain_tile(self, x: int, y: int, terrain: Terrain) -> None:
         pyxel.rect(x, y, TILE_SIZE, TILE_SIZE, TERRAIN_COLOR[terrain])
 
-        if terrain == Terrain.FOREST:
-            pyxel.pset(x + 4, y + 3, 3)
-            pyxel.pset(x + 10, y + 6, 3)
-            pyxel.pset(x + 7, y + 12, 3)
-            pyxel.pset(x + 12, y + 10, 3)
+        if terrain == Terrain.PLAIN:
+            pyxel.pset(x + 2, y + 4, 11)
+            pyxel.pset(x + 8, y + 10, 11)
+            pyxel.pset(x + 13, y + 6, 11)
+            pyxel.pset(x + 5, y + 12, 11)
+            pyxel.pset(x + 11, y + 2, 11)
+        elif terrain == Terrain.FOREST:
+            pyxel.rect(x + 6, y + 2, 4, 8, 3)
+            pyxel.rect(x + 5, y + 3, 6, 6, 11)
+            pyxel.pset(x + 7, y + 4, 3)
+            pyxel.pset(x + 10, y + 5, 3)
+            pyxel.rect(x + 2, y + 10, 3, 3, 3)
+            pyxel.rect(x + 11, y + 9, 3, 4, 3)
         elif terrain == Terrain.RIVER:
-            pyxel.line(x, y + 6, x + TILE_SIZE - 1, y + 6, 7)
-            pyxel.line(x + 2, y + 10, x + TILE_SIZE - 3, y + 10, 7)
+            pyxel.rect(x + 1, y + 3, 14, 2, 12)
+            pyxel.rect(x + 2, y + 8, 12, 2, 12)
+            pyxel.rect(x, y + 12, 16, 2, 12)
+            pyxel.pset(x + 3, y + 4, 7)
+            pyxel.pset(x + 8, y + 9, 7)
+            pyxel.pset(x + 5, y + 13, 7)
         elif terrain == Terrain.SEA:
-            pyxel.line(x + 1, y + 5, x + TILE_SIZE - 2, y + 5, 6)
-            pyxel.line(x + 3, y + 11, x + TILE_SIZE - 4, y + 11, 6)
+            pyxel.rect(x, y + 2, 16, 3, 12)
+            pyxel.rect(x + 2, y + 7, 12, 2, 12)
+            pyxel.rect(x, y + 11, 16, 3, 12)
+            pyxel.pset(x + 2, y + 3, 6)
+            pyxel.pset(x + 10, y + 5, 6)
+            pyxel.pset(x + 6, y + 12, 6)
+
+    def _draw_title_screen(self) -> None:
+        pyxel.cls(1)
+
+        for i in range(8):
+            for j in range(12):
+                x = i * 20 + (j % 2) * 10
+                y = j * 16
+                shade = 3 if (i + j) % 2 == 0 else 5
+                pyxel.rect(x, y, 20, 16, shade)
+
+        title_box_x = SCREEN_WIDTH // 2 - 70
+        title_box_y = 40
+        title_box_w = 140
+        title_box_h = 90
+        pyxel.rect(title_box_x, title_box_y, title_box_w, title_box_h, 0)
+        pyxel.rectb(title_box_x, title_box_y, title_box_w, title_box_h, 7)
+
+        self._draw_text_shadowed(title_box_x + 33, title_box_y + 18, "PIXEL", 12, shadow_color=0, compact=True)
+        self._draw_text_shadowed(title_box_x + 50, title_box_y + 34, "SRPG", 11, shadow_color=0, compact=True)
+
+        pyxel.rect(title_box_x + 20, title_box_y + 52, 100, 2, 5)
+
+        blink = (self.title_frame // 30) % 2 == 0
+        if blink:
+            self._draw_text_shadowed(title_box_x + 20, title_box_y + 70, "Click to Start", 7, shadow_color=0, compact=True)
+
+        self._draw_text(SCREEN_WIDTH // 2 - 40, SCREEN_HEIGHT - 20, "WASD/Arrows to Move", 6, compact=True)
+        self._draw_text(SCREEN_WIDTH // 2 - 36, SCREEN_HEIGHT - 12, "Edge Scroll: Mouse", 6, compact=True)
+
+    def _draw_combat_effects(self) -> None:
+        for effect in self.combat_effects:
+            effect_type = effect.get("type", "")
+            pos = effect.get("target_pos", (0, 0))
+            frames = effect.get("frames_remaining", 0)
+            sx, sy = self._map_to_screen_pixel(pos[0], pos[1])
+            if sx <= -TILE_SIZE or sy <= -TILE_SIZE or sx >= SCREEN_WIDTH or sy >= SCREEN_HEIGHT:
+                continue
+
+            if effect_type == "attack_flash":
+                alpha = min(1.0, frames / 5)
+                if alpha > 0.5:
+                    pyxel.rect(sx + 1, sy + 1, TILE_SIZE - 2, TILE_SIZE - 2, 7)
+
+            elif effect_type == "hit_shake":
+                shake = (5 - frames) % 3 - 1
+                pyxel.rect(sx + 2 + shake, sy + 2, TILE_SIZE - 4, TILE_SIZE - 4, 8)
+                pyxel.rectb(sx + 2 + shake, sy + 2, TILE_SIZE - 4, TILE_SIZE - 4, 9)
+
+            elif effect_type == "defeat_burst":
+                progress = 1.0 - (frames / 20)
+                radius = int(progress * 20)
+                for angle in range(0, 360, 45):
+                    rad = angle * 3.14159 / 180
+                    px = sx + 8 + int(radius * 0.7 * (rad - 0.5))
+                    py = sy + 8 + int(radius * 0.7 * (rad - 0.5))
+                    if 0 <= px < SCREEN_WIDTH and 0 <= py < SCREEN_HEIGHT:
+                        pyxel.pset(px, py, 2)
+
+    def _draw_floating_text(self) -> None:
+        for ft in self.floating_texts:
+            x = ft["x"] - int(self.camera_x)
+            y = ft["y"] - int(self.camera_y)
+            if 0 <= x < SCREEN_WIDTH and 0 <= y < SCREEN_HEIGHT:
+                alpha = ft["frames_remaining"] / 30
+                color = ft["color"]
+                self._draw_text_shadowed(x - 8, y, ft["text"], color, shadow_color=0, compact=True)
 
     def _draw_battle_result(self) -> None:
         if not self.game_over:
             return
 
-        box_w = 148
-        box_h = 38
+        box_w = 160
+        box_h = 60
         box_x = (SCREEN_WIDTH - box_w) // 2
         box_y = (SCREEN_HEIGHT - box_h) // 2
+
+        pyxel.rect(box_x - 4, box_y - 4, box_w + 8, box_h + 8, 0)
         pyxel.rect(box_x, box_y, box_w, box_h, 0)
         pyxel.rectb(box_x, box_y, box_w, box_h, 7)
 
+        for i in range(0, box_w, 8):
+            pyxel.rect(box_x + i, box_y + box_h - 4, 4, 2, 5 if i % 16 == 0 else 3)
+
         result_text = "VICTORY" if self.winner_side == unit_system.Side.PLAYER else "DEFEAT"
-        result_color = 11 if self.winner_side == unit_system.Side.PLAYER else 8
-        self._draw_text(box_x + 48, box_y + 12, result_text, result_color, compact=True)
+        result_color = 3 if self.winner_side == unit_system.Side.PLAYER else 2
+        self._draw_text_shadowed(box_x + 58, box_y + 12, result_text, result_color, shadow_color=0, compact=True)
+
+        sub_text = "Enemy commander defeated!" if self.winner_side == unit_system.Side.PLAYER else "Your commander fell..."
+        self._draw_text(box_x + 16, box_y + 30, sub_text, 6, compact=True)
+
+        blink = (pyxel.frame_count // 20) % 2 == 0
+        if blink:
+            self._draw_text_shadowed(box_x + 40, box_y + 46, "- Click to Restart -", 5, shadow_color=0, compact=True)
 
 
 if __name__ == "__main__":
