@@ -313,6 +313,9 @@ class Game:
             self.hit_stop_frames -= 1
             return
 
+        if self.glitch_frames > 0:
+            self.glitch_frames -= 1
+
         if self.state == GameState.TITLE:
             self._update_title()
             return
