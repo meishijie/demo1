@@ -239,7 +239,7 @@ class Game:
         self.hovered_unit_id = None
         self.enemy_turn_countdown = 0
         self.winner_side = None
-        self.status_text = "Player turn: choose a unit"
+        self.status_text = "Player turn: choose a unit [R:Rewind]"
 
         self.effects = []
         self.particles = []
