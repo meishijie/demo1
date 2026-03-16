@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import os
 import random
-from dataclasses import replace
+import copy
+from dataclasses import dataclass, replace
 from enum import IntEnum
 from typing import Iterable
 
@@ -28,18 +29,37 @@ EDGE_SCROLL_MARGIN = 12
 SCROLL_SPEED = 2.6
 ENEMY_TURN_DELAY_FRAMES = 26
 
-TOP_BAR_HEIGHT = 18
-BOTTOM_BAR_HEIGHT = 14
-END_TURN_BUTTON = (SCREEN_WIDTH - 76, 3, 70, 12)
+TOP_BAR_HEIGHT = 16
+BOTTOM_BAR_HEIGHT = 12
+END_TURN_BUTTON = (SCREEN_WIDTH - 72, 2, 68, 12)
 PLAYER_COMMANDER_ID = "p_lord"
 ENEMY_COMMANDER_ID = "e_lord"
 
+
+@dataclass
+class VFXEffect:
+    x: float
+    y: float
+    type: str  # "text", "flash", "bump", "slash"
+    text: str = ""
+    color: int = 7
+    life: int = 20
+    max_life: int = 20
+    vy: float = 0.0  # vertical velocity for floating text
+
+@dataclass
+class Particle:
+    x: float
+    y: float
+    vx: float
+    vy: float
+    color: int
+    life: int
 
 class GameState(IntEnum):
     TITLE = 0
     PLAYING = 1
     GAME_OVER = 2
-
 
 class Terrain(IntEnum):
     PLAIN = 0
@@ -47,6 +67,7 @@ class Terrain(IntEnum):
     RIVER = 2
     SEA = 3
     FIRE = 4
+    BLOOD = 5
 
 
 TERRAIN_COLOR = {
@@ -54,7 +75,8 @@ TERRAIN_COLOR = {
     Terrain.FOREST: 11,
     Terrain.RIVER: 12,
     Terrain.SEA: 1,
-    Terrain.FIRE: 9,
+    Terrain.FIRE: 8,
+    Terrain.BLOOD: 8,
 }
 
 IMPASSABLE_TERRAIN = {Terrain.RIVER, Terrain.SEA}
@@ -85,8 +107,12 @@ def attackable_enemy_positions(attacker: "unit_system.Unit", units: Iterable["un
     stats = unit_system.get_unit_stats(attacker.unit_type)
     targets: set[tuple[int, int]] = set()
     for unit in units:
-        if unit.side == attacker.side:
-            continue
+        if attacker.unit_type == unit_system.UnitType.HEALER:
+            if unit.side != attacker.side or unit.unit_id == attacker.unit_id or unit.hp >= 100:
+                continue
+        else:
+            if unit.side == attacker.side:
+                continue
         distance = manhattan_distance(attacker.position, unit.position)
         if stats.min_range <= distance <= stats.max_range:
             targets.add(unit.position)
@@ -159,12 +185,41 @@ class Game:
             raise RuntimeError("unit_system is required for Wave 2 gameplay")
 
         pyxel.init(SCREEN_WIDTH, SCREEN_HEIGHT, title="Pyxel SRPG Prototype", fps=30)
+        try:
+            pyxel.load("assets/resource.pyxres")
+        except Exception:
+            pass
+        
+        self._init_sounds()
+        try:
+            pyxel.playm(0, loop=True)
+        except Exception:
+            pass
+            
         pyxel.mouse(True)
 
+        self.default_font, self.compact_font = self._load_fonts()
+        self.state = GameState.TITLE
+        self._init_game()
+        
+        pyxel.run(self.update, self.draw)
+
+    def _init_sounds(self) -> None:
+        # 0: Hit/Damage
+        pyxel.sounds[0].set("a3a2c1a1", "n", "7", "s", 5)
+        # 1: Move select
+        pyxel.sounds[1].set("e2e3", "p", "7", "s", 4)
+        # 2: Heal/Magic
+        pyxel.sounds[2].set("c3e3g3c4", "s", "4444", "v", 5)
+
+    def _init_game(self) -> None:
         self.map_width = MAP_WIDTH
         self.map_height = MAP_HEIGHT
         self.terrain_map = _generate_map(self.map_width, self.map_height)
         self.terrain_lookup = self._build_terrain_lookup()
+
+        self.wave = 1
+        self.score = 0
 
         self.camera_x = 0.0
         self.camera_y = 0.0
@@ -174,28 +229,31 @@ class Game:
 
         self.units = self._create_initial_units()
         self.current_turn = unit_system.Side.PLAYER
-        self.acted_unit_ids: set[str] = set()
-        self.enemy_acted_unit_ids: set[str] = set()
+        self.acted_unit_ids = set()
+        self.enemy_acted_unit_ids = set()
 
-        self.selected_unit_id: str | None = None
-        self.move_candidates: set[tuple[int, int]] = set()
-        self.attack_candidates: set[tuple[int, int]] = set()
+        self.selected_unit_id = None
+        self.move_candidates = set()
+        self.attack_candidates = set()
 
-        self.hovered_unit_id: str | None = None
+        self.hovered_unit_id = None
         self.enemy_turn_countdown = 0
-        self.game_over = False
-        self.winner_side: unit_system.Side | None = None
+        self.winner_side = None
         self.status_text = "Player turn: choose a unit"
 
-        self.game_state = GameState.TITLE
-        self.title_frame = 0
-
-        self.default_font, self.compact_font = self._load_fonts()
-
-        self.combat_effects: list[dict] = []
-        self.floating_texts: list[dict] = []
-
-        pyxel.run(self.update, self.draw)
+        self.effects = []
+        self.particles = []
+        self.shake_x = 0
+        self.shake_y = 0
+        self.shake_duration = 0
+        self.animating = False
+        self.combat_queue = []
+        self.move_queue = []
+        self.hit_stop_frames = 0
+        self.glitch_frames = 0
+        self.history = []
+        self.combat_timer = 0
+        self.unit_offsets = {}
 
     def _load_fonts(self) -> tuple[pyxel.Font | None, pyxel.Font | None]:
         default_font = self._try_load_font("umplus_j12r.bdf")
@@ -226,21 +284,18 @@ class Game:
     def _draw_text(self, x: int, y: int, text: str, color: int, compact: bool = False) -> None:
         pyxel.text(x, y, text, color, self._choose_font(text, compact=compact))
 
-    def _draw_text_shadowed(self, x: int, y: int, text: str, color: int, shadow_color: int = 0, compact: bool = False) -> None:
-        try:
-            self._draw_text(x + 1, y + 1, text, shadow_color, compact)
-        except Exception:
-            pass
-        self._draw_text(x, y, text, color, compact)
-
     def _create_initial_units(self) -> list["unit_system.Unit"]:
         return [
             unit_system.Unit("p_lord", unit_system.Side.PLAYER, unit_system.UnitType.SPEAR, (4, 6), hp=100),
             unit_system.Unit("p_cav", unit_system.Side.PLAYER, unit_system.UnitType.CAVALRY, (3, 8), hp=100),
             unit_system.Unit("p_arch", unit_system.Side.PLAYER, unit_system.UnitType.ARCHER, (6, 8), hp=100),
+            unit_system.Unit("p_mage", unit_system.Side.PLAYER, unit_system.UnitType.MAGE, (5, 7), hp=100),
+            unit_system.Unit("p_healer", unit_system.Side.PLAYER, unit_system.UnitType.HEALER, (6, 6), hp=100),
             unit_system.Unit("e_lord", unit_system.Side.ENEMY, unit_system.UnitType.SPEAR, (12, 7), hp=100),
             unit_system.Unit("e_cav", unit_system.Side.ENEMY, unit_system.UnitType.CAVALRY, (13, 9), hp=100),
             unit_system.Unit("e_arch", unit_system.Side.ENEMY, unit_system.UnitType.ARCHER, (15, 6), hp=100),
+            unit_system.Unit("e_mage", unit_system.Side.ENEMY, unit_system.UnitType.MAGE, (14, 8), hp=100),
+            unit_system.Unit("e_healer", unit_system.Side.ENEMY, unit_system.UnitType.HEALER, (15, 7), hp=100),
         ]
 
     def _build_terrain_lookup(self) -> dict[tuple[int, int], str]:
@@ -251,58 +306,338 @@ class Game:
         return lookup
 
     def update(self) -> None:
-        if self.game_state == GameState.TITLE:
-            self.title_frame += 1
-            if pyxel.btnp(pyxel.MOUSE_BUTTON_LEFT) or pyxel.btnp(pyxel.KEY_RETURN):
-                self.game_state = GameState.PLAYING
+        self._update_effects()
+        self._look_update_shake()
+
+        if self.hit_stop_frames > 0:
+            self.hit_stop_frames -= 1
             return
 
-        if self.game_over:
-            if pyxel.btnp(pyxel.MOUSE_BUTTON_LEFT) or pyxel.btnp(pyxel.KEY_RETURN):
-                self._restart_game()
+        if self.state == GameState.TITLE:
+            self._update_title()
+            return
+        elif self.state == GameState.GAME_OVER:
+            self._update_game_over()
+
+        if self.state != GameState.TITLE:
+            self._update_combat_animation()
+            self._update_move_animation()
+
+            if self.animating:
+                return
+
+            self._update_edge_scroll()
+            self._update_hovered_unit()
+            if self.state == GameState.GAME_OVER or self._check_battle_end():
+                return
+
+            if self.current_turn == unit_system.Side.ENEMY:
+                self._update_enemy_turn()
+                return
+
+            self._handle_player_input()
+
+    def _update_title(self) -> None:
+        if pyxel.btnp(pyxel.MOUSE_BUTTON_LEFT) or pyxel.btnp(pyxel.KEY_SPACE):
+            self._init_game()
+            self.state = GameState.PLAYING
+
+    def _update_game_over(self) -> None:
+        if self.enemy_turn_countdown > 0:
+            self.enemy_turn_countdown -= 1
+        else:
+            if pyxel.btnp(pyxel.MOUSE_BUTTON_LEFT) or pyxel.btnp(pyxel.KEY_SPACE):
+                self.state = GameState.TITLE
+
+    def _add_effect(self, x: float, y: float, eff_type: str, text: str = "", color: int = 7, life: int = 20) -> None:
+        vy = -1.5 if eff_type == "text" else 0.0
+        self.effects.append(VFXEffect(x=x, y=y, type=eff_type, text=text, color=color, life=life, max_life=life, vy=vy))
+
+    def _spawn_particles(self, cx: float, cy: float, count: int, colors: list[int]) -> None:
+        for _ in range(count):
+            angle = random.uniform(0, 6.28)
+            speed = random.uniform(0.5, 2.0)
+            vx = speed * pyxel.cos(angle * 180 / 3.14159)
+            vy = -speed * pyxel.sin(angle * 180 / 3.14159) - 1.0 # Bias upwards
+            life = random.randint(10, 25)
+            color = random.choice(colors)
+            self.particles.append(Particle(cx, cy, vx, vy, color, life))
+
+    def _update_effects(self) -> None:
+        for i in range(len(self.effects) - 1, -1, -1):
+            eff = self.effects[i]
+            eff.life -= 1
+            if eff.type == "text":
+                eff.y += eff.vy
+                eff.vy += 0.15 # Gravity
+            else:
+                eff.y += eff.vy
+            
+            if eff.life <= 0:
+                self.effects.pop(i)
+
+        for i in range(len(self.particles) - 1, -1, -1):
+            p = self.particles[i]
+            p.life -= 1
+            p.x += p.vx
+            p.y += p.vy
+            p.vy += 0.2  # Gravity
+            if p.life <= 0:
+                self.particles.pop(i)
+
+    def _trigger_shake(self, duration: int = 8) -> None:
+        self.shake_duration = duration
+
+    def _look_update_shake(self) -> None:
+        if self.shake_duration > 0:
+            self.shake_x = random.randint(-4, 4)
+            self.shake_y = random.randint(-4, 4)
+            self.shake_duration -= 1
+        else:
+            self.shake_x = 0
+            self.shake_y = 0
+
+    def _update_move_animation(self) -> None:
+        if not self.move_queue:
             return
 
-        self._update_combat_effects()
-        self._update_edge_scroll()
-        self._update_hovered_unit()
-        if self.game_over or self._check_battle_end():
+        self.combat_timer += 1
+        curr = self.move_queue[0]
+        unit_id = curr["unit_id"]
+        start_tile = curr["start_tile"]
+        target_tile = curr["target_tile"]
+
+        # Duration 10 frames
+        duration = 10
+        if self.combat_timer <= duration:
+            t = self.combat_timer / duration
+            # Interpolate in pixels relative to center of start_tile
+            dx = (target_tile[0] - start_tile[0]) * TILE_SIZE * t
+            dy = (target_tile[1] - start_tile[1]) * TILE_SIZE * t
+            self.unit_offsets[unit_id] = (dx, dy)
+        else:
+            # End of move
+            self.unit_offsets[unit_id] = (0, 0)
+            unit = self._unit_by_id(unit_id)
+            if unit:
+                target_terrain = self.terrain_map[target_tile[1]][target_tile[0]]
+                occupant = self._unit_at(target_tile)
+                
+                if occupant and occupant.unit_id != unit_id:
+                    # KATAMARI MERGE!
+                    new_hp = min(500, unit.hp + occupant.hp)
+                    # We must carefully remove occupant from units list without leaving blood
+                    self.units = [u for u in self.units if u.unit_id != occupant.unit_id]
+                    self.acted_unit_ids.discard(occupant.unit_id)
+                    self.enemy_acted_unit_ids.discard(occupant.unit_id)
+                    
+                    self._replace_unit(replace(unit, position=target_tile, hp=new_hp))
+                    self._add_effect(target_tile[0]*TILE_SIZE + 4, target_tile[1]*TILE_SIZE - 10, "text", "MERGE!", 10, life=40)
+                    self._spawn_particles(target_tile[0]*TILE_SIZE + 8, target_tile[1]*TILE_SIZE + 8, 20, [10, 7, 3, 9])
+                    self._trigger_shake(15)
+                elif target_terrain == Terrain.BLOOD:
+                    new_hp = unit.hp + 15
+                    self._replace_unit(replace(unit, position=target_tile, hp=new_hp))
+                    self._add_effect(target_tile[0]*TILE_SIZE, target_tile[1]*TILE_SIZE - 8, "text", "+15 (BLOOD!)", 8, life=40)
+                    self._spawn_particles(target_tile[0]*TILE_SIZE + 8, target_tile[1]*TILE_SIZE + 8, 15, [8, 14])
+                    self._trigger_shake(8)
+                    self.terrain_map[target_tile[1]][target_tile[0]] = Terrain.PLAIN
+                    self.terrain_lookup[(target_tile[0], target_tile[1])] = "plain"
+                else:
+                    self._replace_unit(replace(unit, position=target_tile))
+
+            self.move_queue.pop(0)
+            self.combat_timer = 0
+            if not self.move_queue:
+                self.animating = False
+                # Callback logic for turn switching or battle checks
+                if curr.get("is_enemy"):
+                    pass # Enemy turn countdown handles next
+                else:
+                    self._auto_switch_turn_if_needed()
+
+    def _update_combat_animation(self) -> None:
+        if not self.combat_queue:
             return
 
-        if self.current_turn == unit_system.Side.ENEMY:
-            self._update_enemy_turn()
-            return
+        self.combat_timer += 1
+        curr = self.combat_queue[0]
 
-        self._handle_player_input()
+        # Phase 1: Bump (Frames 0-6)
+        if 1 <= self.combat_timer <= 6:
+            attacker = curr["attacker"]
+            defender = curr["defender"]
+            
+            if attacker.side == unit_system.Side.PLAYER and 3 <= self.combat_timer <= 6:
+                if pyxel.btnp(pyxel.KEY_SPACE) and not curr.get("qte_success"):
+                    curr["qte_success"] = True
+                    sx, sy = self._map_to_screen_pixel(attacker.position[0], attacker.position[1])
+                    self._add_effect(sx, sy - 8, "text", text="PERFECT!", color=10, life=20)
+                    try:
+                        pyxel.play(0, 1) # simple success sound
+                    except Exception:
+                        pass
+            
+            # Direction vector
+            dx = defender.position[0] - attacker.position[0]
+            dy = defender.position[1] - attacker.position[1]
+            dist = (dx**2 + dy**2)**0.5
+            if dist > 0:
+                # Move slightly towards target
+                strength = 6.0 * (self.combat_timer / 6.0)
+                self.unit_offsets[attacker.unit_id] = (dx / dist * strength, dy / dist * strength)
+        elif 7 <= self.combat_timer <= 12:
+            attacker = curr["attacker"]
+            # Back to normal soon
+            self.unit_offsets[attacker.unit_id] = (0, 0)
 
-    def _restart_game(self) -> None:
-        self.units = self._create_initial_units()
-        self.current_turn = unit_system.Side.PLAYER
-        self.acted_unit_ids.clear()
-        self.enemy_acted_unit_ids.clear()
-        self.selected_unit_id = None
-        self.move_candidates.clear()
-        self.attack_candidates.clear()
-        self.hovered_unit_id = None
-        self.enemy_turn_countdown = 0
-        self.game_over = False
-        self.winner_side = None
-        self.status_text = "Player turn: choose a unit"
-        self.combat_effects.clear()
-        self.floating_texts.clear()
-        self.camera_x = 0.0
-        self.camera_y = 0.0
+        # Phase 2: Impact (Frame 7)
+        if self.combat_timer == 7:
+            attacker = curr["attacker"]
+            defender = curr["defender"]
+            damage = curr["damage"]
+            is_dead = curr["is_dead"]
 
-    def _update_combat_effects(self) -> None:
-        for effect in self.combat_effects[:]:
-            effect["frames_remaining"] -= 1
-            if effect["frames_remaining"] <= 0:
-                self.combat_effects.remove(effect)
+            if curr.get("qte_success"):
+                self.hit_stop_frames = 15
+                if damage > 0:
+                    damage = int(damage * 1.5)
+                    curr["damage"] = damage
+                    is_dead = (defender.hp - damage <= 0)
+                    curr["is_dead"] = is_dead
+            else:
+                self.hit_stop_frames = 4
 
-        for ft in self.floating_texts[:]:
-            ft["frames_remaining"] -= 1
-            ft["y"] -= 0.5
-            if ft["frames_remaining"] <= 0:
-                self.floating_texts.remove(ft)
+            # Visual Feedback
+            sx, sy = self._map_to_screen_pixel(defender.position[0], defender.position[1])
+            cx, cy = sx + TILE_SIZE // 2, sy + TILE_SIZE // 2
+
+            if damage < 0:
+                self._add_effect(sx, sy, "flash", color=11, life=6)
+                self._spawn_particles(cx, cy, 6, [11, 3, 7])
+                self._add_effect(sx, sy - 4, "text", text=f"+{-damage}", color=11, life=40)
+                try:
+                    pyxel.play(0, 2) # Heal sound
+                except Exception:
+                    pass
+            else:
+                self._add_effect(sx, sy, "flash", life=6)
+                self._add_effect(sx, sy, "slash", life=5) # Slash effect
+                self._trigger_shake(10)
+                # Particles
+                p_colors = [8, 9, 10] if damage > 0 else [6, 7, 13]
+                self._spawn_particles(cx, cy, 5 if damage > 0 else 2, p_colors)
+                # Floating text
+                txt = f"-{damage}" if damage > 0 else "BLOCK"
+                col = 8 if damage > 0 else 7
+                self._add_effect(sx, sy - 4, "text", text=txt, color=col, life=30)
+                try:
+                    pyxel.play(0, 0)
+                except Exception:
+                    pass
+
+            # Apply Logic
+            if is_dead:
+                self._remove_unit(defender.unit_id)
+                # Death explosion
+                d_colors = [8, 2, 10] if defender.side == unit_system.Side.ENEMY else [12, 6, 7]
+                self._spawn_particles(cx, cy, 15, d_colors + [7])
+            else:
+                new_hp = max(0, min(max(100, defender.hp), defender.hp - damage))
+                final_pos = defender.position
+                knockback_path = curr.get("knockback_path", [])
+                
+                slam_cx, slam_cy = cx, cy
+                
+                # Resolve knockback
+                if curr["attacker"].unit_type == unit_system.UnitType.MAGE and curr.get("defender_terrain_enum") == unit_system.TerrainType.FOREST:
+                    dx, dy = curr["defender"].position
+                    self.terrain_map[dy][dx] = unit_system.TerrainType.FIRE
+                    self.terrain_lookup[(dx, dy)] = "fire"
+                    self._add_effect(dx * TILE_SIZE, dy * TILE_SIZE - 8, "text", text="IGNITE!", color=8, life=40)
+                    self._spawn_particles(dx * TILE_SIZE + 8, dy * TILE_SIZE + 8, 15, [8, 10, 9])
+                    self._trigger_shake(15)
+
+                for k_pos in knockback_path:
+                    slam_sx, slam_sy = self._map_to_screen_pixel(k_pos[0], k_pos[1])
+                    slam_cx, slam_cy = slam_sx + TILE_SIZE // 2, slam_sy + TILE_SIZE // 2
+
+                    if not (0 <= k_pos[0] < self.map_width and 0 <= k_pos[1] < self.map_height):
+                        new_hp -= 20
+                        self._add_effect(slam_sx, slam_sy, "text", text="SLAM!", color=8, life=40)
+                        self._trigger_shake(25) # Huge hit-stop/shake
+                        break
+                    t_type = self.terrain_lookup.get(k_pos, "grass")
+                    if t_type in ("mountain", "water"):
+                        new_hp -= 20
+                        self._add_effect(slam_sx, slam_sy, "text", text="SLAM!", color=8, life=40)
+                        self._spawn_particles(slam_cx, slam_cy, 8, [13, 5, 1])
+                        self._trigger_shake(25)
+                        break
+                    occupant = self._unit_at(k_pos)
+                    if occupant:
+                        new_hp -= 15
+                        occ_hp = occupant.hp - 15
+                        if occ_hp <= 0:
+                            self._remove_unit(occupant.unit_id)
+                            self._add_effect(slam_sx, slam_sy, "text", text="CRUSHED!", color=8, life=40)
+                        else:
+                            self._replace_unit(replace(occupant, hp=occ_hp))
+                            self._add_effect(slam_sx, slam_sy, "text", text="CRASH!", color=10, life=40)
+                        self._trigger_shake(30) # Bowling effect
+                        break
+                        
+                    final_pos = k_pos
+                    
+                if new_hp <= 0:
+                    self._remove_unit(defender.unit_id)
+                    d_colors = [8, 2, 10] if defender.side == unit_system.Side.ENEMY else [12, 6, 7]
+                    self._spawn_particles(slam_cx, slam_cy, 20, d_colors + [7])
+                else:    
+                    self._replace_unit(replace(defender, hp=new_hp, position=final_pos))
+
+        # Phase 3: Finish (Frame 20)
+        if self.combat_timer >= 20:
+            self.unit_offsets.clear()
+            self.combat_queue.pop(0)
+            self.combat_timer = 0
+            if not self.combat_queue:
+                self.animating = False
+                self._auto_switch_turn_if_needed()
+
+    def _apply_attack(self, attacker: "unit_system.Unit", defender: "unit_system.Unit") -> None:
+        defender_terrain = unit_system.TerrainType(
+            self.terrain_map[defender.position[1]][defender.position[0]].name.lower()
+        )
+        preview = unit_system.preview_combat(attacker, defender, defender_terrain, self.units)
+        damage = preview.predicted_damage
+        is_dead = (defender.hp - damage <= 0) if damage > 0 else False
+        knockback_dist = preview.knockback_dist if damage > 0 else 0
+        knockback_path = []
+        if knockback_dist > 0:
+            dx = defender.position[0] - attacker.position[0]
+            dy = defender.position[1] - attacker.position[1]
+            if dx != 0: dx = 1 if dx > 0 else -1
+            if dy != 0: dy = 1 if dy > 0 else -1
+            for i in range(1, knockback_dist + 1):
+                knockback_path.append((defender.position[0] + dx * i, defender.position[1] + dy * i))
+
+        self.combat_timer = 0
+        self.combat_queue.append({
+            "attacker": attacker,
+            "defender": defender,
+            "damage": damage,
+            "is_dead": is_dead,
+            "knockback_path": knockback_path,
+            "defender_terrain_enum": self.terrain_map[defender.position[1]][defender.position[0]]
+        })
+
+        if damage < 0:
+            self.status_text = f"{attacker.unit_id} healed {defender.unit_id} for {-damage}"
+        elif is_dead:
+            self.status_text = f"{attacker.unit_id} defeated {defender.unit_id}!"
+        else:
+            self.status_text = f"{attacker.unit_id} hit {defender.unit_id} for {damage}"
 
     def _update_enemy_turn(self) -> None:
         if self.enemy_turn_countdown > 0:
@@ -322,11 +657,95 @@ class Game:
             return
         self.enemy_turn_countdown = max(1, ENEMY_TURN_DELAY_FRAMES // 3)
 
+    def _save_state(self) -> None:
+        state = {
+            "units": copy.deepcopy(self.units),
+            "terrain_map": copy.deepcopy(self.terrain_map),
+            "terrain_lookup": copy.deepcopy(self.terrain_lookup),
+            "score": self.score,
+            "wave": self.wave,
+            "acted_unit_ids": copy.deepcopy(self.acted_unit_ids),
+        }
+        self.history.append(state)
+        if len(self.history) > 10:
+            self.history.pop(0)
+
+    def _rewind_time(self) -> None:
+        if not self.history:
+            return
+
+        # Pop the current state (which is the one we just finished)
+        # and then pop the previous state to revert to.
+        # This ensures we don't just re-load the current state.
+        if len(self.history) > 1:
+            self.history.pop() # Remove current state
+            prev_state = self.history.pop() # Get the state before that
+        else:
+            # If only one state, revert to it and clear history
+            prev_state = self.history.pop()
+
+        self.units = prev_state["units"]
+        self.terrain_map = prev_state["terrain_map"]
+        self.terrain_lookup = prev_state["terrain_lookup"]
+        self.score = prev_state["score"]
+        self.wave = prev_state["wave"]
+        self.acted_unit_ids = prev_state["acted_unit_ids"]
+
+        self.current_turn = unit_system.Side.PLAYER # Always rewind to player turn
+        self.enemy_acted_unit_ids.clear()
+        self.selected_unit_id = None
+        self.move_candidates.clear()
+        self.attack_candidates.clear()
+        self.hovered_unit_id = None
+        self.enemy_turn_countdown = 0
+        self.winner_side = None
+        self.status_text = "Time rewound! Player turn."
+        self.glitch_frames = 30 # Visual effect for rewind
+        try:
+            pyxel.play(0, 0) # Play a sound for rewind
+        except Exception:
+            pass
+
     def _start_player_turn(self) -> None:
         self.current_turn = unit_system.Side.PLAYER
+        self.status_text = "Player phase..."
         self.acted_unit_ids.clear()
-        self.enemy_acted_unit_ids.clear()
-        self.status_text = "Player turn: choose a unit"
+        self._clear_selection()
+        self._save_state()
+        self._process_terrain_effects(unit_system.Side.PLAYER)
+
+    def _process_terrain_effects(self, side: "unit_system.Side") -> None:
+        for i, u in enumerate(self.units):
+            if u.hp > 0 and u.side == side:
+                terrain_name = self.terrain_lookup.get(u.position)
+                
+                if u.unit_type == unit_system.UnitType.SLIME:
+                    if terrain_name in ["fire", "blood", "forest"]:
+                        new_hp = min(200, u.hp + 20)
+                        x, y = u.position
+                        self.terrain_map[y][x] = Terrain.PLAIN
+                        self.terrain_lookup[(x, y)] = "plain"
+                        
+                        self._replace_unit(replace(u, hp=new_hp))
+                        self._add_effect(x*TILE_SIZE, y*TILE_SIZE - 8, "text", f"ATE {terrain_name.upper()}!", 11)
+                        self._spawn_particles(x*TILE_SIZE + 8, y*TILE_SIZE + 8, 15, [11, 3, 5])
+                        self._trigger_shake(5)
+                        try:
+                            pyxel.play(0, 2)
+                        except Exception:
+                            pass
+                        continue
+
+                if terrain_name == "fire":
+                    new_hp = u.hp - 10
+                    if new_hp <= 0:
+                        self._remove_unit(u.unit_id)
+                        self._add_effect(u.position[0]*TILE_SIZE, u.position[1]*TILE_SIZE - 8, "text", "BURNED!", 8)
+                    else:
+                        self._replace_unit(replace(u, hp=new_hp))
+                        self._add_effect(u.position[0]*TILE_SIZE, u.position[1]*TILE_SIZE - 8, "text", "-10 (FIRE)", 8)
+                        self._spawn_particles(u.position[0]*TILE_SIZE + 8, u.position[1]*TILE_SIZE + 8, 8, [8,10,9])
+                    self._trigger_shake(10)
 
     def _next_unacted_enemy_unit(self) -> "unit_system.Unit | None":
         for unit in self.units:
@@ -345,19 +764,22 @@ class Game:
         targets = [
             unit
             for unit in self.units
-            if unit.side == unit_system.Side.PLAYER and unit.position in attack_tiles and unit.hp > 0
+            if unit.position in attack_tiles and unit.hp > 0
         ]
         if not targets:
             return False
 
-        target = min(
-            targets,
-            key=lambda unit: (
-                unit.unit_id != PLAYER_COMMANDER_ID,
-                unit.hp,
-                manhattan_distance(enemy_unit.position, unit.position),
-            ),
-        )
+        if enemy_unit.unit_type == unit_system.UnitType.HEALER:
+            target = min(targets, key=lambda u: u.hp)
+        else:
+            target = min(
+                targets,
+                key=lambda unit: (
+                    unit.unit_id != PLAYER_COMMANDER_ID,
+                    unit.hp,
+                    manhattan_distance(enemy_unit.position, unit.position),
+                ),
+            )
         self._apply_attack(enemy_unit, target)
         return True
 
@@ -392,7 +814,15 @@ class Game:
             self.status_text = f"{enemy_unit.unit_id} holds position"
             return False
 
-        self._replace_unit(replace(enemy_unit, position=best_tile))
+        self.combat_timer = 0
+        self.move_queue.append({
+            "unit_id": enemy_unit.unit_id,
+            "start_tile": enemy_unit.position,
+            "target_tile": best_tile,
+            "is_enemy": True
+        })
+        self.animating = True
+
         self.status_text = f"{enemy_unit.unit_id} advanced to {best_tile}"
         return True
 
@@ -464,100 +894,121 @@ class Game:
         self.status_text = f"{unit.unit_id}: choose move or attack"
 
     def _execute_move(self, unit: "unit_system.Unit", target: tuple[int, int]) -> None:
-        self._replace_unit(replace(unit, position=target))
         self.acted_unit_ids.add(unit.unit_id)
-        self.status_text = f"{unit.unit_id} moved to {target}"
+        self.status_text = f"{unit.unit_id} moving to {target}"
+        try:
+            pyxel.play(1, 1) # Move sound
+        except Exception:
+            pass
+
+        self.animating = True
+        self.combat_timer = 0
+        self.move_queue.append({
+            "unit_id": unit.unit_id,
+            "start_tile": unit.position,
+            "target_tile": target,
+            "is_enemy": False
+        })
+
         self._clear_selection()
-        self._auto_switch_turn_if_needed()
 
     def _execute_attack(self, attacker: "unit_system.Unit", defender: "unit_system.Unit") -> None:
         self._apply_attack(attacker, defender)
         self.acted_unit_ids.add(attacker.unit_id)
         self._clear_selection()
-        if self._check_battle_end():
-            return
-        self._auto_switch_turn_if_needed()
+        # Turn switching is now handled by animation end if animating
+        if not self.animating:
+            self._auto_switch_turn_if_needed()
 
-    def _apply_attack(self, attacker: "unit_system.Unit", defender: "unit_system.Unit") -> None:
-        defender_terrain = unit_system.TerrainType(
-            self.terrain_map[defender.position[1]][defender.position[0]].name.lower()
-        )
-        resolution = unit_system.resolve_combat(attacker, defender, defender_terrain)
-
-        self.combat_effects.append({
-            "type": "attack_flash",
-            "target_pos": defender.position,
-            "frames_remaining": 5,
-        })
-
-        self.floating_texts.append({
-            "text": f"-{resolution.predicted_damage}",
-            "x": defender.position[0] * TILE_SIZE + TILE_SIZE // 2,
-            "y": defender.position[1] * TILE_SIZE,
-            "frames_remaining": 30,
-            "color": 9,
-        })
-
-        if resolution.defender_defeated:
-            self._remove_unit(defender.unit_id)
-            self.combat_effects.append({
-                "type": "defeat_burst",
-                "target_pos": defender.position,
-                "frames_remaining": 20,
-            })
-            self.status_text = (
-                f"{attacker.unit_id} dealt {resolution.predicted_damage} and defeated {defender.unit_id}"
-            )
-        else:
-            self._replace_unit(replace(defender, hp=resolution.defender_next_hp))
-            self.combat_effects.append({
-                "type": "hit_shake",
-                "target_pos": defender.position,
-                "frames_remaining": 8,
-            })
-            self.status_text = (
-                f"{attacker.unit_id} dealt {resolution.predicted_damage} to {defender.unit_id}"
-            )
+    # REMOVE duplicate _apply_attack below (Old implementation)
 
     def _auto_switch_turn_if_needed(self) -> None:
-        if self.game_over:
+        if self.state == GameState.GAME_OVER or self.current_turn != unit_system.Side.PLAYER:
             return
         if has_unacted_units(self.units, unit_system.Side.PLAYER, self.acted_unit_ids):
             return
         self._switch_to_enemy_turn(manual=False)
 
     def _switch_to_enemy_turn(self, manual: bool) -> None:
-        if self.game_over:
+        if self.state == GameState.GAME_OVER:
             return
         self._clear_selection()
         self.current_turn = unit_system.Side.ENEMY
         self.enemy_turn_countdown = ENEMY_TURN_DELAY_FRAMES
         self.enemy_acted_unit_ids.clear()
+        self._process_terrain_effects(unit_system.Side.ENEMY)
         if manual:
             self.status_text = "Player ended turn manually"
         else:
             self.status_text = "All units acted; enemy turn"
 
+    def _start_next_wave(self) -> None:
+        self.wave += 1
+        player_hp_sum = sum(u.hp for u in self.units if u.side == unit_system.Side.PLAYER)
+        self.score += int((self.wave - 1) * 100 * (1.0 + player_hp_sum / 500.0))
+        self.status_text = f"Wave {self.wave} Started!"
+        try:
+            pyxel.play(2, 2)
+        except Exception:
+            pass
+
+        for i, u in enumerate(self.units):
+            if u.side == unit_system.Side.PLAYER:
+                self.units[i] = replace(u, hp=max(100, u.hp))
+
+        import random
+        enemy_count = min(12, 3 + self.wave)
+        enemy_types = [
+            unit_system.UnitType.SPEAR,
+            unit_system.UnitType.CAVALRY,
+            unit_system.UnitType.ARCHER,
+            unit_system.UnitType.MAGE,
+            unit_system.UnitType.HEALER,
+            unit_system.UnitType.SLIME,
+        ]
+
+        occupied = {u.position for u in self.units}
+        spawn_x_min = self.map_width // 2
+        for i in range(enemy_count):
+            e_type = random.choice(enemy_types)
+            for _ in range(50):
+                rx = random.randint(spawn_x_min, self.map_width - 1)
+                ry = random.randint(0, self.map_height - 1)
+                tt = self.terrain_lookup.get((rx, ry), "grass")
+                if tt in ("mountain", "water"): continue
+                
+                if (rx, ry) not in occupied:
+                    occupied.add((rx, ry))
+                    hp_bonus = (self.wave - 1) * 10
+                    self.units.append(
+                        unit_system.Unit(f"e_w{self.wave}_{i}", unit_system.Side.ENEMY, e_type, (rx, ry), hp=100 + hp_bonus)
+                    )
+                    break
+                    
+        self.current_turn = unit_system.Side.PLAYER
+        self.acted_unit_ids.clear()
+        self.enemy_acted_unit_ids.clear()
+        self._clear_selection()
+
     def _check_battle_end(self) -> bool:
-        if self.game_over:
+        if self.state == GameState.GAME_OVER:
             return True
 
         player_lord_alive = self._unit_by_id(PLAYER_COMMANDER_ID) is not None
-        enemy_lord_alive = self._unit_by_id(ENEMY_COMMANDER_ID) is not None
-        if player_lord_alive and enemy_lord_alive:
-            return False
-
-        self.game_over = True
-        self.enemy_turn_countdown = 0
-        self._clear_selection()
-
-        if enemy_lord_alive:
+        if not player_lord_alive:
+            self.state = GameState.GAME_OVER
+            self.enemy_turn_countdown = 30 # Use as cooldown before click allowed
+            self._clear_selection()
             self.winner_side = unit_system.Side.ENEMY
             self.status_text = "Defeat: your commander was defeated"
-        else:
-            self.winner_side = unit_system.Side.PLAYER
-            self.status_text = "Victory: enemy commander defeated"
-        return True
+            return True
+
+        enemy_alive = any(u.side == unit_system.Side.ENEMY for u in self.units)
+        if not enemy_alive:
+            self._start_next_wave()
+            return False
+
+        return False
 
     def _unit_by_id(self, unit_id: str | None) -> "unit_system.Unit | None":
         if unit_id is None:
@@ -577,7 +1028,12 @@ class Game:
         self.units = [next_unit if unit.unit_id == next_unit.unit_id else unit for unit in self.units]
 
     def _remove_unit(self, unit_id: str) -> None:
-        self.units = [unit for unit in self.units if unit.unit_id != unit_id]
+        unit = self._unit_by_id(unit_id)
+        if unit:
+            dx, dy = unit.position
+            self.terrain_map[dy][dx] = Terrain.BLOOD
+            self.terrain_lookup[(dx, dy)] = "blood"
+        self.units = [u for u in self.units if u.unit_id != unit_id]
         self.acted_unit_ids.discard(unit_id)
         self.enemy_acted_unit_ids.discard(unit_id)
         if self.selected_unit_id == unit_id:
@@ -589,8 +1045,6 @@ class Game:
         self.attack_candidates.clear()
 
     def _screen_to_map_tile(self, screen_x: int, screen_y: int) -> tuple[int, int] | None:
-        if screen_y < TOP_BAR_HEIGHT or screen_y >= SCREEN_HEIGHT - BOTTOM_BAR_HEIGHT:
-            return None
         map_x = int((screen_x + self.camera_x) // TILE_SIZE)
         map_y = int((screen_y + self.camera_y) // TILE_SIZE)
         if 0 <= map_x < self.map_width and 0 <= map_y < self.map_height:
@@ -598,7 +1052,7 @@ class Game:
         return None
 
     def _map_to_screen_pixel(self, map_x: int, map_y: int) -> tuple[int, int]:
-        return map_x * TILE_SIZE - int(self.camera_x), map_y * TILE_SIZE - int(self.camera_y)
+        return map_x * TILE_SIZE - int(self.camera_x + self.shake_x), map_y * TILE_SIZE - int(self.camera_y + self.shake_y)
 
     def _update_hovered_unit(self) -> None:
         hovered_tile = self._screen_to_map_tile(pyxel.mouse_x, pyxel.mouse_y)
@@ -635,302 +1089,314 @@ class Game:
         self.camera_y = min(max(self.camera_y, 0.0), self.max_camera_y)
 
     def draw(self) -> None:
-        if self.game_state == GameState.TITLE:
-            self._draw_title_screen()
-            return
-
         pyxel.cls(0)
 
-        start_tile_x = int(self.camera_x // TILE_SIZE)
-        start_tile_y = int(self.camera_y // TILE_SIZE)
-        offset_x = -int(self.camera_x % TILE_SIZE)
-        offset_y = -int(self.camera_y % TILE_SIZE)
+        # Apply screen shake to coordinates
+        cam_x = self.camera_x + self.shake_x
+        cam_y = self.camera_y + self.shake_y
 
-        for screen_ty in range(VISIBLE_TILES_Y + 2):
-            map_y = start_tile_y + screen_ty
-            if map_y >= self.map_height:
-                continue
+        start_tile_x = int(cam_x // TILE_SIZE)
+        start_tile_y = int(cam_y // TILE_SIZE)
+        offset_x = -int(cam_x % TILE_SIZE)
+        offset_y = -int(cam_y % TILE_SIZE)
 
-            draw_y = offset_y + screen_ty * TILE_SIZE
-            for screen_tx in range(VISIBLE_TILES_X + 2):
-                map_x = start_tile_x + screen_tx
-                if map_x >= self.map_width:
+        if self.state in (GameState.PLAYING, GameState.GAME_OVER):
+            for screen_ty in range(VISIBLE_TILES_Y + 2):
+                map_y = start_tile_y + screen_ty
+                if map_y >= self.map_height:
                     continue
 
-                draw_x = offset_x + screen_tx * TILE_SIZE
-                terrain = self.terrain_map[map_y][map_x]
-                self._draw_terrain_tile(draw_x, draw_y, terrain)
+                draw_y = offset_y + screen_ty * TILE_SIZE
+                for screen_tx in range(VISIBLE_TILES_X + 2):
+                    map_x = start_tile_x + screen_tx
+                    if map_x >= self.map_width:
+                        continue
 
-        self._draw_action_candidates()
-        self._draw_units()
-        self._draw_combat_effects()
-        self._draw_floating_text()
-        self._draw_top_bar()
-        self._draw_bottom_bar()
-        self._draw_hover_unit_info()
-        self._draw_battle_result()
+                    draw_x = offset_x + screen_tx * TILE_SIZE
+                    terrain = self.terrain_map[map_y][map_x]
+                    self._draw_terrain_tile(draw_x, draw_y, terrain)
+
+            self._draw_action_candidates()
+            self._draw_units()
+            self._draw_top_bar()
+            self._draw_bottom_bar()
+            self._draw_hover_unit_info()
+            self._draw_effects()
+            self._draw_battle_result()
+            if getattr(self, "glitch_frames", 0) > 0:
+                self._draw_glitch()
+        elif self.state == GameState.TITLE:
+            self._draw_title()
+
+    def _draw_glitch(self) -> None:
+        import random
+        for _ in range(self.glitch_frames // 2 + 1):
+            y = random.randint(0, SCREEN_HEIGHT)
+            h = random.randint(1, 4)
+            color = random.choice([0, 1, 2, 5, 8, 11])
+            pyxel.rect(0, y, SCREEN_WIDTH, h, color)
+        if self.glitch_frames % 2 == 0:
+            shift_y = random.randint(0, SCREEN_HEIGHT)
+            shift_h = random.randint(10, 30)
+            pyxel.rect(0, shift_y, SCREEN_WIDTH, shift_h, random.choice([1, 2, 5]))
+
+    def _draw_effects(self) -> None:
+        for eff in self.effects:
+            if eff.type == "text":
+                self._draw_text(int(eff.x), int(eff.y), eff.text, eff.color, compact=True)
+            elif eff.type == "flash":
+                # Flicker effect based on life
+                if (eff.life // 2) % 2 == 0:
+                    pyxel.rect(int(eff.x), int(eff.y), TILE_SIZE, TILE_SIZE, 7)
+            elif eff.type == "slash":
+                # Draw a simple slash arc or line
+                cx, cy = int(eff.x) + TILE_SIZE//2, int(eff.y) + TILE_SIZE//2
+                offset = 6 - eff.life
+                pyxel.line(cx - 6 + offset, cy - 6 - offset, cx + 6 + offset, cy + 6 - offset, 7)
+                if eff.life > 2:
+                    pyxel.line(cx - 5 + offset, cy - 6 - offset, cx + 7 + offset, cy + 6 - offset, 10)
+
+        for p in self.particles:
+            pyxel.pset(int(p.x), int(p.y), p.color)
 
     def _draw_action_candidates(self) -> None:
         for map_x, map_y in self.move_candidates:
             sx, sy = self._map_to_screen_pixel(map_x, map_y)
             if sx <= -TILE_SIZE or sy <= -TILE_SIZE or sx >= SCREEN_WIDTH or sy >= SCREEN_HEIGHT:
                 continue
-            pyxel.rect(sx + 2, sy + 2, TILE_SIZE - 4, TILE_SIZE - 4, 11)
-            pyxel.rectb(sx + 1, sy + 1, TILE_SIZE - 2, TILE_SIZE - 2, 11)
+            pyxel.rectb(sx + 1, sy + 1, TILE_SIZE - 2, TILE_SIZE - 2, 10)
 
         for map_x, map_y in self.attack_candidates:
             sx, sy = self._map_to_screen_pixel(map_x, map_y)
             if sx <= -TILE_SIZE or sy <= -TILE_SIZE or sx >= SCREEN_WIDTH or sy >= SCREEN_HEIGHT:
                 continue
-            pyxel.rectb(sx + 1, sy + 1, TILE_SIZE - 2, TILE_SIZE - 2, 9)
-            pyxel.rectb(sx + 2, sy + 2, TILE_SIZE - 4, TILE_SIZE - 4, 9)
+            pyxel.rectb(sx + 2, sy + 2, TILE_SIZE - 4, TILE_SIZE - 4, 8)
 
     def _draw_units(self) -> None:
         for unit in self.units:
             sx, sy = self._map_to_screen_pixel(unit.position[0], unit.position[1])
+
+            # Apply unit-specific animation offset
+            ox, oy = self.unit_offsets.get(unit.unit_id, (0, 0))
+            sx += int(ox)
+            sy += int(oy)
+
             if sx <= -TILE_SIZE or sy <= -TILE_SIZE or sx >= SCREEN_WIDTH or sy >= SCREEN_HEIGHT:
                 continue
 
-            is_player = unit.side == unit_system.Side.PLAYER
-            is_acted = unit.unit_id in self.acted_unit_ids or unit.unit_id in self.enemy_acted_unit_ids
+            u_type = unit.unit_type
+            u_side = unit.side
+            
+            u_x = 0
+            u_y = 16 if u_side == unit_system.Side.PLAYER else 32
+            
+            u_x = 0
+            if u_type == unit_system.UnitType.SPEAR:
+                u_x = 0
+            elif u_type == unit_system.UnitType.CAVALRY:
+                u_x = 16
+            elif u_type == unit_system.UnitType.ARCHER:
+                u_x = 32
+            elif u_type == unit_system.UnitType.MAGE:
+                u_x = 32
+            elif u_type == unit_system.UnitType.HEALER:
+                u_x = 0
 
-            if is_acted:
-                base_color = 5
+            if u_type != unit_system.UnitType.SLIME:
+                pyxel.blt(sx, sy, 0, u_x, u_y, 16, 16, 0)
+                if u_type == unit_system.UnitType.MAGE:
+                    pyxel.text(sx + 10, sy + 6, "m", 8)
+                elif u_type == unit_system.UnitType.HEALER:
+                    pyxel.text(sx + 10, sy + 6, "h", 11)
             else:
-                base_color = 3 if is_player else 2
+                sc = 11 if u_side == unit_system.Side.PLAYER else 3
+                pyxel.rect(sx + 4, sy + 8, 8, 6, sc)
+                pyxel.rect(sx + 3, sy + 10, 10, 4, sc)
+                pyxel.rect(sx + 5, sy + 6, 6, 2, sc)
+                pyxel.pset(sx + 6, sy + 8, 0)
+                pyxel.pset(sx + 9, sy + 8, 0)
 
-            pyxel.rect(sx + 2, sy + 2, TILE_SIZE - 4, TILE_SIZE - 4, base_color)
-            pyxel.rectb(sx + 2, sy + 2, TILE_SIZE - 4, TILE_SIZE - 4, 0)
-
-            unit_type = unit.unit_type
-            if unit_type == unit_system.UnitType.SPEAR:
-                pyxel.line(sx + 8, sy + 3, sx + 4, sy + 10, 7)
-                pyxel.line(sx + 8, sy + 3, sx + 12, sy + 10, 7)
-                pyxel.line(sx + 4, sy + 10, sx + 12, sy + 10, 7)
-            elif unit_type == unit_system.UnitType.CAVALRY:
-                pyxel.rect(sx + 4, sy + 4, 8, 6, 7)
-                pyxel.rect(sx + 5, sy + 3, 2, 2, 7)
-                pyxel.rect(sx + 9, sy + 3, 2, 2, 7)
-            elif unit_type == unit_system.UnitType.ARCHER:
-                pyxel.line(sx + 8, sy + 3, sx + 5, sy + 11, 7)
-                pyxel.line(sx + 8, sy + 3, sx + 11, sy + 11, 7)
-                pyxel.pset(sx + 8, sy + 3, 7)
-
-            hp_bar_width = 10
-            hp_bar_height = 2
-            hp_ratio = max(0, unit.hp / 100)
-            hp_color = 11 if hp_ratio > 0.5 else (10 if hp_ratio > 0.25 else 8)
-            pyxel.rect(sx + 3, sy + 13, hp_bar_width, hp_bar_height, 0)
-            pyxel.rect(sx + 3, sy + 13, int(hp_bar_width * hp_ratio), hp_bar_height, hp_color)
-
-            if not is_acted and is_player:
-                pyxel.pset(sx + 13, sy + 2, 11)
+            if unit.side == unit_system.Side.PLAYER and unit.unit_id in self.acted_unit_ids:
+                # Dim the unit
+                pyxel.rect(sx, sy, 16, 16, 5) # Draw semi-transparent rect or use pal? Pal is better but here just a rect overlay is simple
+                
+            # Floating HP Bar
+            hp_ratio = min(1.0, unit.hp / 100)
+            bar_color = 11 if unit.side == unit_system.Side.PLAYER else 8
+            pyxel.rect(sx, sy - 3, 16, 2, 0)
+            pyxel.rect(sx, sy - 3, int(16 * hp_ratio), 2, bar_color)
+            if unit.hp > 100:
+                over_ratio = min(1.0, (unit.hp - 100) / 400) # Since max is 500
+                over_col = 10 if unit.side == unit_system.Side.PLAYER else 9
+                pyxel.rect(sx, sy - 2, int(16 * over_ratio), 1, over_col)
+            
+            # Action status indicator
+            if unit.unit_id not in self.acted_unit_ids and unit.side == self.current_turn:
+                # tiny green dot for "ready"
+                pyxel.pset(sx + 14, sy - 3, 11)
 
             if unit.unit_id == self.selected_unit_id:
-                pulse = 7 if (pyxel.frame_count // 6) % 2 == 0 else 0
-                pyxel.rectb(sx - 1, sy - 1, TILE_SIZE + 2, TILE_SIZE + 2, pulse)
+                pyxel.rectb(sx, sy, TILE_SIZE, TILE_SIZE, 7)
 
     def _draw_top_bar(self) -> None:
-        pyxel.rect(0, 0, SCREEN_WIDTH, TOP_BAR_HEIGHT, 0)
-        pyxel.rect(0, TOP_BAR_HEIGHT - 2, SCREEN_WIDTH, 2, 5)
+        # Semi-transparent background (stipple pattern)
+        for y in range(TOP_BAR_HEIGHT):
+            for x in range(SCREEN_WIDTH):
+                if (x + y) % 2 == 0:
+                    pyxel.pset(x, y, 0)
+                else:
+                    pyxel.pset(x, y, 1)
+        pyxel.line(0, TOP_BAR_HEIGHT, SCREEN_WIDTH, TOP_BAR_HEIGHT, 5) # Border
 
-        accent_color = 5
-        for i in range(0, SCREEN_WIDTH, 8):
-            pyxel.rect(i, TOP_BAR_HEIGHT - 2, 2, 2, accent_color if i % 16 == 0 else 3)
+        turn_text = "TURN: PLAYER" if self.current_turn == unit_system.Side.PLAYER else "TURN: ENEMY"
+        
+        # Text shadow for better readability
+        self._draw_text(5, 5, turn_text, 0, compact=True)
+        self._draw_text(4, 4, turn_text, 7, compact=True)
 
-        if self.game_over:
-            turn_text = "BATTLE END"
-            turn_color = 7
-        else:
-            turn_text = "PLAYER" if self.current_turn == unit_system.Side.PLAYER else "ENEMY"
-            turn_color = 3 if self.current_turn == unit_system.Side.PLAYER else 2
-
-        self._draw_text(4, 4, "TURN:", 6, compact=True)
-        self._draw_text_shadowed(32, 4, turn_text, turn_color, shadow_color=0, compact=True)
-
-        if self.current_turn == unit_system.Side.PLAYER and not self.game_over:
-            pyxel.rect(4, 13, 26, 3, 3)
+        wave_score_text = f"WAVE: {self.wave} | SCORE: {self.score}"
+        self._draw_text(61, 5, wave_score_text, 0, compact=True)
+        self._draw_text(60, 4, wave_score_text, 10, compact=True)
 
         button_x, button_y, button_w, button_h = END_TURN_BUTTON
-        button_hovered = self._is_mouse_on_end_turn_button(pyxel.mouse_x, pyxel.mouse_y)
-        if self.current_turn == unit_system.Side.PLAYER and not self.game_over:
-            button_color = 10 if button_hovered else 2
-            text_color = 0 if button_hovered else 7
-        else:
-            button_color = 5
-            text_color = 6
+        button_color = 2 if (self.current_turn == unit_system.Side.PLAYER) else 5
         pyxel.rect(button_x, button_y, button_w, button_h, button_color)
         pyxel.rectb(button_x, button_y, button_w, button_h, 7)
-        self._draw_text_shadowed(button_x + 8, button_y + 3, "End Turn", text_color, shadow_color=0, compact=True)
+        self._draw_text(button_x + 8, button_y + 3, "End Turn", 7, compact=True)
 
     def _draw_bottom_bar(self) -> None:
-        pyxel.rect(0, SCREEN_HEIGHT - BOTTOM_BAR_HEIGHT, SCREEN_WIDTH, BOTTOM_BAR_HEIGHT, 0)
-        pyxel.rect(0, SCREEN_HEIGHT - BOTTOM_BAR_HEIGHT, SCREEN_WIDTH, 2, 5)
+        # Semi-transparent background
+        for y in range(SCREEN_HEIGHT - BOTTOM_BAR_HEIGHT, SCREEN_HEIGHT):
+            for x in range(SCREEN_WIDTH):
+                if (x + y) % 2 == 0:
+                    pyxel.pset(x, y, 0)
+                else:
+                    pyxel.pset(x, y, 1)
+        pyxel.line(0, SCREEN_HEIGHT - BOTTOM_BAR_HEIGHT - 1, SCREEN_WIDTH, SCREEN_HEIGHT - BOTTOM_BAR_HEIGHT - 1, 5)
 
-        for i in range(0, SCREEN_WIDTH, 8):
-            pyxel.rect(i, SCREEN_HEIGHT - BOTTOM_BAR_HEIGHT + 12, 2, 2, 3 if i % 16 == 0 else 1)
-
-        status_y = SCREEN_HEIGHT - 10
-        self._draw_text(4, status_y, self.status_text[:52], 7, compact=True)
+        self._draw_text(5, SCREEN_HEIGHT - 8, self.status_text[:56], 0, compact=True)
+        self._draw_text(4, SCREEN_HEIGHT - 9, self.status_text[:56], 7, compact=True)
 
     def _draw_hover_unit_info(self) -> None:
-        unit = self._unit_by_id(self.hovered_unit_id)
-        if unit is None:
+        hovered_tile = self._screen_to_map_tile(pyxel.mouse_x, pyxel.mouse_y)
+        if hovered_tile is None:
             return
 
-        stats = unit_system.get_unit_stats(unit.unit_type)
-        is_player = unit.side == unit_system.Side.PLAYER
-        side_label = "PLAYER" if is_player else "ENEMY"
-        unit_type_label = unit.unit_type.value.upper()
+        unit = self._unit_at(hovered_tile)
+        terrain = self.terrain_map[hovered_tile[1]][hovered_tile[0]]
+        
+        selected_unit = self._unit_by_id(self.selected_unit_id)
+        is_attack_preview = (
+            selected_unit and 
+            unit and 
+            unit.side != selected_unit.side and 
+            hovered_tile in self.attack_candidates
+        )
+        
+        lines = []
+        if unit:
+            stats = unit_system.get_unit_stats(unit.unit_type)
+            side_label = "玩家" if unit.side == unit_system.Side.PLAYER else "敌军"
+            lines.extend([
+                f"[{unit.unit_id}] {side_label}",
+                f"HP: {unit.hp} | {unit.unit_type.value.upper()}",
+                f"ATK/DEF: {stats.attack}/{stats.defense}",
+                f"MOV/RNG: {stats.movement} | {stats.min_range}-{stats.max_range}",
+            ])
+            
+        lines.append(f"地形: {terrain.name}")
+        terrain_type = unit_system.TerrainType(terrain.name.lower())
+        def_bonus = unit_system.terrain_defense_bonus(terrain_type)
+        if def_bonus > 0:
+            lines.append(f"地形防御: +{def_bonus}")
+            
+        if is_attack_preview and unit is not None:
+            lines.append("--- 战斗预测 ---")
+            preview = unit_system.preview_combat(selected_unit, unit, terrain_type, self.units)
+            if preview.predicted_damage < 0:
+                lines.append(f"预计治疗: {-preview.predicted_damage}")
+            else:
+                lines.append(f"预计伤害: {preview.predicted_damage}")
+            lines.append(f"克制倍率: {preview.attacker_multiplier}x")
 
-        box_w = 120
-        box_h = 54
-        box_x = min(max(pyxel.mouse_x + 12, 2), SCREEN_WIDTH - box_w - 2)
-        box_y = min(max(pyxel.mouse_y + 12, TOP_BAR_HEIGHT + 2), SCREEN_HEIGHT - box_h - BOTTOM_BAR_HEIGHT)
+        box_w = 142
+        box_h = len(lines) * 11 + 8
+        box_x = min(max(pyxel.mouse_x + 8, 2), SCREEN_WIDTH - box_w - 2)
+        box_y = min(max(pyxel.mouse_y + 8, TOP_BAR_HEIGHT + 1), SCREEN_HEIGHT - box_h - BOTTOM_BAR_HEIGHT)
 
-        pyxel.rect(box_x, box_y, box_w, box_h, 0)
-        pyxel.rectb(box_x, box_y, box_w, box_h, 7)
+        compact = True
 
-        header_color = 3 if is_player else 2
-        self._draw_text_shadowed(box_x + 4, box_y + 3, f"[{side_label}]", header_color, shadow_color=0, compact=True)
-
-        self._draw_text(box_x + 4, box_y + 14, f"TYPE:{unit_type_label}", 6, compact=True)
-        self._draw_text(box_x + 72, box_y + 14, f"HP:{unit.hp}", 10 if unit.hp > 30 else 8, compact=True)
-
-        self._draw_text(box_x + 4, box_y + 24, f"ATK:{stats.attack}", 8, compact=True)
-        self._draw_text(box_x + 48, box_y + 24, f"DEF:{stats.defense}", 6, compact=True)
-        self._draw_text(box_x + 88, box_y + 24, f"MOV:{stats.movement}", 11, compact=True)
-
-        range_text = f"RNG:{stats.min_range}-{stats.max_range}"
-        self._draw_text(box_x + 4, box_y + 34, range_text, 12 if stats.max_range > 1 else 6, compact=True)
-
-        if unit.unit_id in self.acted_unit_ids or unit.unit_id in self.enemy_acted_unit_ids:
-            self._draw_text(box_x + 70, box_y + 34, "[ACTED]", 5, compact=True)
+        pyxel.rect(box_x, box_y, box_w, box_h, 1)
+        pyxel.rectb(box_x, box_y, box_w, box_h, 7 if not is_attack_preview else 8)
+        
+        for i, line in enumerate(lines):
+            color = 7
+            if "战斗预测" in line: color = 8
+            elif "预计伤害" in line: color = 10
+            elif "克制" in line and "1.25" in line: color = 11
+            elif "克制" in line and "0.75" in line: color = 8
+            elif "地形防御" in line: color = 11
+            self._draw_text(box_x + 4, box_y + 4 + i * 11, line, color, compact=compact)
 
     def _draw_terrain_tile(self, x: int, y: int, terrain: Terrain) -> None:
-        pyxel.rect(x, y, TILE_SIZE, TILE_SIZE, TERRAIN_COLOR[terrain])
-
+        t_x = 0
+        t_y = 0
         if terrain == Terrain.PLAIN:
-            pyxel.pset(x + 2, y + 4, 11)
-            pyxel.pset(x + 8, y + 10, 11)
-            pyxel.pset(x + 13, y + 6, 11)
-            pyxel.pset(x + 5, y + 12, 11)
-            pyxel.pset(x + 11, y + 2, 11)
+            t_x = 0
         elif terrain == Terrain.FOREST:
-            pyxel.rect(x + 6, y + 2, 4, 8, 3)
-            pyxel.rect(x + 5, y + 3, 6, 6, 11)
-            pyxel.pset(x + 7, y + 4, 3)
-            pyxel.pset(x + 10, y + 5, 3)
-            pyxel.rect(x + 2, y + 10, 3, 3, 3)
-            pyxel.rect(x + 11, y + 9, 3, 4, 3)
+            t_x = 16
         elif terrain == Terrain.RIVER:
-            pyxel.rect(x + 1, y + 3, 14, 2, 12)
-            pyxel.rect(x + 2, y + 8, 12, 2, 12)
-            pyxel.rect(x, y + 12, 16, 2, 12)
-            pyxel.pset(x + 3, y + 4, 7)
-            pyxel.pset(x + 8, y + 9, 7)
-            pyxel.pset(x + 5, y + 13, 7)
+            t_x = 32
         elif terrain == Terrain.SEA:
-            pyxel.rect(x, y + 2, 16, 3, 12)
-            pyxel.rect(x + 2, y + 7, 12, 2, 12)
-            pyxel.rect(x, y + 11, 16, 3, 12)
-            pyxel.pset(x + 2, y + 3, 6)
-            pyxel.pset(x + 10, y + 5, 6)
-            pyxel.pset(x + 6, y + 12, 6)
+            t_x = 48
+            
+        pyxel.blt(x, y, 0, t_x, t_y, 16, 16)
 
-    def _draw_title_screen(self) -> None:
-        pyxel.cls(1)
+    def _draw_title(self) -> None:
+        title_text = "Pyxel Strategy Demo"
+        start_text = "- Click to Start -"
+        
+        # Simple animated background for title
+        for i in range(50):
+            pyxel.pset(random.randint(0, SCREEN_WIDTH), random.randint(0, SCREEN_HEIGHT), random.choice([1, 5, 13]))
 
-        for i in range(8):
-            for j in range(12):
-                x = i * 20 + (j % 2) * 10
-                y = j * 16
-                shade = 3 if (i + j) % 2 == 0 else 5
-                pyxel.rect(x, y, 20, 16, shade)
+        # Shadow and Title
+        self._draw_text(SCREEN_WIDTH//2 - len(title_text)*4 + 2, SCREEN_HEIGHT//2 - 20 + 2, title_text, 0)
+        self._draw_text(SCREEN_WIDTH//2 - len(title_text)*4, SCREEN_HEIGHT//2 - 20, title_text, 10)
 
-        title_box_x = SCREEN_WIDTH // 2 - 70
-        title_box_y = 40
-        title_box_w = 140
-        title_box_h = 90
-        pyxel.rect(title_box_x, title_box_y, title_box_w, title_box_h, 0)
-        pyxel.rectb(title_box_x, title_box_y, title_box_w, title_box_h, 7)
-
-        self._draw_text_shadowed(title_box_x + 33, title_box_y + 18, "PIXEL", 12, shadow_color=0, compact=True)
-        self._draw_text_shadowed(title_box_x + 50, title_box_y + 34, "SRPG", 11, shadow_color=0, compact=True)
-
-        pyxel.rect(title_box_x + 20, title_box_y + 52, 100, 2, 5)
-
-        blink = (self.title_frame // 30) % 2 == 0
-        if blink:
-            self._draw_text_shadowed(title_box_x + 20, title_box_y + 70, "Click to Start", 7, shadow_color=0, compact=True)
-
-        self._draw_text(SCREEN_WIDTH // 2 - 40, SCREEN_HEIGHT - 20, "WASD/Arrows to Move", 6, compact=True)
-        self._draw_text(SCREEN_WIDTH // 2 - 36, SCREEN_HEIGHT - 12, "Edge Scroll: Mouse", 6, compact=True)
-
-    def _draw_combat_effects(self) -> None:
-        for effect in self.combat_effects:
-            effect_type = effect.get("type", "")
-            pos = effect.get("target_pos", (0, 0))
-            frames = effect.get("frames_remaining", 0)
-            sx, sy = self._map_to_screen_pixel(pos[0], pos[1])
-            if sx <= -TILE_SIZE or sy <= -TILE_SIZE or sx >= SCREEN_WIDTH or sy >= SCREEN_HEIGHT:
-                continue
-
-            if effect_type == "attack_flash":
-                alpha = min(1.0, frames / 5)
-                if alpha > 0.5:
-                    pyxel.rect(sx + 1, sy + 1, TILE_SIZE - 2, TILE_SIZE - 2, 7)
-
-            elif effect_type == "hit_shake":
-                shake = (5 - frames) % 3 - 1
-                pyxel.rect(sx + 2 + shake, sy + 2, TILE_SIZE - 4, TILE_SIZE - 4, 8)
-                pyxel.rectb(sx + 2 + shake, sy + 2, TILE_SIZE - 4, TILE_SIZE - 4, 9)
-
-            elif effect_type == "defeat_burst":
-                progress = 1.0 - (frames / 20)
-                radius = int(progress * 20)
-                for angle in range(0, 360, 45):
-                    rad = angle * 3.14159 / 180
-                    px = sx + 8 + int(radius * 0.7 * (rad - 0.5))
-                    py = sy + 8 + int(radius * 0.7 * (rad - 0.5))
-                    if 0 <= px < SCREEN_WIDTH and 0 <= py < SCREEN_HEIGHT:
-                        pyxel.pset(px, py, 2)
-
-    def _draw_floating_text(self) -> None:
-        for ft in self.floating_texts:
-            x = ft["x"] - int(self.camera_x)
-            y = ft["y"] - int(self.camera_y)
-            if 0 <= x < SCREEN_WIDTH and 0 <= y < SCREEN_HEIGHT:
-                alpha = ft["frames_remaining"] / 30
-                color = ft["color"]
-                self._draw_text_shadowed(x - 8, y, ft["text"], color, shadow_color=0, compact=True)
+        # Blinking start text
+        if (pyxel.frame_count // 15) % 2 == 0:
+            self._draw_text(SCREEN_WIDTH//2 - len(start_text)*3 + 2, SCREEN_HEIGHT//2 + 10 + 2, start_text, 0, compact=True)
+            self._draw_text(SCREEN_WIDTH//2 - len(start_text)*3, SCREEN_HEIGHT//2 + 10, start_text, 7, compact=True)
 
     def _draw_battle_result(self) -> None:
-        if not self.game_over:
+        if self.state != GameState.GAME_OVER:
             return
 
         box_w = 160
         box_h = 60
         box_x = (SCREEN_WIDTH - box_w) // 2
         box_y = (SCREEN_HEIGHT - box_h) // 2
+        
+        # Semi-transparent overlay for the whole screen
+        for y in range(SCREEN_HEIGHT):
+            for x in range(SCREEN_WIDTH):
+                if (x + y) % 2 == 0:
+                    pyxel.pset(x, y, 0)
 
-        pyxel.rect(box_x - 4, box_y - 4, box_w + 8, box_h + 8, 0)
         pyxel.rect(box_x, box_y, box_w, box_h, 0)
-        pyxel.rectb(box_x, box_y, box_w, box_h, 7)
+        
+        is_victory = self.winner_side == unit_system.Side.PLAYER
+        result_color = 11 if is_victory else 8
+        pyxel.rectb(box_x, box_y, box_w, box_h, result_color)
+        pyxel.rectb(box_x+1, box_y+1, box_w-2, box_h-2, result_color)
 
-        for i in range(0, box_w, 8):
-            pyxel.rect(box_x + i, box_y + box_h - 4, 4, 2, 5 if i % 16 == 0 else 3)
-
-        result_text = "VICTORY" if self.winner_side == unit_system.Side.PLAYER else "DEFEAT"
-        result_color = 3 if self.winner_side == unit_system.Side.PLAYER else 2
-        self._draw_text_shadowed(box_x + 58, box_y + 12, result_text, result_color, shadow_color=0, compact=True)
-
-        sub_text = "Enemy commander defeated!" if self.winner_side == unit_system.Side.PLAYER else "Your commander fell..."
-        self._draw_text(box_x + 16, box_y + 30, sub_text, 6, compact=True)
-
-        blink = (pyxel.frame_count // 20) % 2 == 0
-        if blink:
-            self._draw_text_shadowed(box_x + 40, box_y + 46, "- Click to Restart -", 5, shadow_color=0, compact=True)
+        result_text = "VICTORY!" if is_victory else "DEFEAT"
+        self._draw_text(box_x + box_w//2 - len(result_text)*4, box_y + 16, result_text, result_color)
+        
+        if self.enemy_turn_countdown <= 0:
+            prompt = "Click or Space to Title"
+            self._draw_text(box_x + box_w//2 - len(prompt)*3, box_y + 40, prompt, 7, compact=True)
 
 
 if __name__ == "__main__":

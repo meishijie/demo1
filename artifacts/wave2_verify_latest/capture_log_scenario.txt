@@ -1,0 +1,20 @@
+## close_combat_attack_preview
+- saved artifacts/wave2_verify_latest/close_combat_attack_preview_1.png
+- Frame 4
+- saved artifacts/wave2_verify_latest/close_combat_attack_preview_2.png
+- Frame 10
+- saved artifacts/wave2_verify_latest/close_combat_attack_preview_3.png
+- Frame 30
+- Captured 3 frames with 4 input events
+
+## close_combat_attack_and_result
+- saved artifacts/wave2_verify_latest/close_combat_attack_and_result_1.png
+- Frame 6
+- saved artifacts/wave2_verify_latest/close_combat_attack_and_result_2.png
+- Frame 10
+- saved artifacts/wave2_verify_latest/close_combat_attack_and_result_3.png
+- Frame 20
+- saved artifacts/wave2_verify_latest/close_combat_attack_and_result_4.png
+- Frame 30
+- Captured 4 frames with 6 input events
+

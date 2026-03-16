@@ -1,0 +1,6 @@
+[
+  {"frame": 1, "mouse_x": 160, "mouse_y": 96, "keys": ["MOUSE_BUTTON_LEFT"]},
+  {"frame": 2, "mouse_x": 160, "mouse_y": 96, "keys": []},
+  {"frame": 3, "mouse_x": 250, "mouse_y": 8, "keys": ["MOUSE_BUTTON_LEFT"]},
+  {"frame": 4, "mouse_x": 250, "mouse_y": 8, "keys": []}
+]

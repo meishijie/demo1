@@ -1,0 +1,11 @@
+- saved artifacts/wave2_verify_latest/nonlethal_attack_1.png
+- Frame 6
+- saved artifacts/wave2_verify_latest/nonlethal_attack_2.png
+- Frame 8
+- saved artifacts/wave2_verify_latest/nonlethal_attack_3.png
+- Frame 12
+- saved artifacts/wave2_verify_latest/nonlethal_attack_4.png
+- Frame 20
+- saved artifacts/wave2_verify_latest/nonlethal_attack_5.png
+- Frame 30
+- Captured 5 frames with 6 input events

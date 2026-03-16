@@ -1,0 +1,11 @@
+- saved artifacts/wave2_verify_latest/defeat_scenario_1.png
+- Frame 5
+- saved artifacts/wave2_verify_latest/defeat_scenario_2.png
+- Frame 20
+- saved artifacts/wave2_verify_latest/defeat_scenario_3.png
+- Frame 30
+- saved artifacts/wave2_verify_latest/defeat_scenario_4.png
+- Frame 40
+- saved artifacts/wave2_verify_latest/defeat_scenario_5.png
+- Frame 50
+- Captured 5 frames with 4 input events

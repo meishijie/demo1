@@ -1,0 +1,29 @@
+## title_frame30
+- saved artifacts/wave2_verify_latest/title_frame30_1.png
+- Captured at frame 30, scale 2x
+
+## battlefield_idle_frame30
+- saved artifacts/wave2_verify_latest/battlefield_idle_frame30_1.png
+- Frame 30
+- Captured 1 frames with 2 input events
+
+## hover_player_frame30
+- saved artifacts/wave2_verify_latest/hover_player_frame30_1.png
+- Frame 30
+- Captured 1 frames with 2 input events
+
+## hover_enemy_frame30
+- saved artifacts/wave2_verify_latest/hover_enemy_frame30_1.png
+- Frame 30
+- Captured 1 frames with 2 input events
+
+## select_player_frame30
+- saved artifacts/wave2_verify_latest/select_player_frame30_1.png
+- Frame 30
+- Captured 1 frames with 4 input events
+
+## hover_endturn_button_frame30
+- saved artifacts/wave2_verify_latest/hover_endturn_button_frame30_1.png
+- Frame 30
+- Captured 1 frames with 2 input events
+
