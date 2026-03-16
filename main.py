@@ -840,6 +840,13 @@ class Game:
         )
 
     def _handle_player_input(self) -> None:
+        if pyxel.btnp(pyxel.KEY_R):
+            if not self.history:
+                self.status_text = "No history to rewind!"
+                return
+            self._rewind_time()
+            return
+
         if pyxel.btnp(pyxel.MOUSE_BUTTON_RIGHT):
             self._clear_selection()
 
