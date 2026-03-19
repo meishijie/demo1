@@ -11,7 +11,7 @@ class ForestOfEyes(HorrorDemo):
     title_cn = "眼之森林"
     description_cn = "一位充满敌意的神明在松林上空注视。闭眼时移动，睁眼时躲避。"
     goal_cn = "穿越丛林，触碰圣地，同时保持侦测值在崩溃线以下。"
-    controls_cn = "WASD: 移动"
+    controls_cn = "WASD: 移动 空格: 屏息"
     accent_color = 9
 
     def __init__(self, font: pyxel.Font | None = None):
@@ -29,13 +29,19 @@ class ForestOfEyes(HorrorDemo):
         self.eye_state = 0
         self.eye_timer = 100
         self.detection = 0.0
+        self.breath = 100.0
+        self.is_holding_breath = False
         self.set_status("巨眼已闭合", "侦测值 0%")
 
     def is_hidden(self) -> bool:
+        hidden = False
         for tree in self.trees:
             if rects_overlap(self.px, self.py, 8, 8, *tree):
-                return True
-        return False
+                hidden = True
+                break
+        if self.eye_state == 2:
+            return hidden and self.is_holding_breath
+        return hidden
 
     def _advance_eye_cycle(self) -> None:
         self.eye_timer -= 1
@@ -64,12 +70,22 @@ class ForestOfEyes(HorrorDemo):
         self.px = clamp(self.px, 6, 240)
         self.py = clamp(self.py, 12, PLAYFIELD_HEIGHT - 20)
 
+        if pyxel.btn(pyxel.KEY_SPACE) and self.breath > 0:
+            self.is_holding_breath = True
+            self.breath -= 1.2
+        else:
+            self.is_holding_breath = False
+            self.breath = min(100.0, self.breath + 0.6)
+
         self._advance_eye_cycle()
 
         if self.eye_state == 2 and not self.is_hidden():
             self.detection += 2.4
         else:
             self.detection = max(0.0, self.detection - 3.5)
+            
+        if self.eye_state == 2 and self.breath <= 0:
+            self.detection += 1.0
 
         if self.detection >= 100:
             self.mark_failure("巨眼记住了你的轮廓。森林将永远注视着你。")
@@ -101,9 +117,12 @@ class ForestOfEyes(HorrorDemo):
         pyxel.rectb(self.exit_rect[0], self.exit_rect[1], self.exit_rect[2], self.exit_rect[3], 7)
 
         pyxel.rect(self.px, self.py, 8, 8, 11)
-        if self.is_hidden():
+        if self.is_hidden() and self.eye_state == 2:
+            pyxel.text(self.px - 6, self.py - 8, "已屏息", 12, self.font)
+        elif self.is_hidden():
             pyxel.text(self.px - 6, self.py - 8, "已隐藏", 7, self.font)
         elif self.eye_state == 2:
             pyxel.text(self.px - 6, self.py - 8, "跑！！", 8, self.font)
 
+        draw_meter(150, 199, 80, self.breath, 100, 12)
         draw_meter(150, 205, 80, self.detection, 100, 8)

@@ -20,6 +20,7 @@ class ZeroHourLoop(HorrorDemo):
         self.top_door = (112, 24, 32, 12)
         self.player_x = 124.0
         self.player_y = 174.0
+        self.shadow_y = 220.0
         self.loops = 0
         self.inspected: set[str] = set()
         self.hint = "穿过顶部的门开始循环。"
@@ -44,7 +45,8 @@ class ZeroHourLoop(HorrorDemo):
                 self.inspected.add(str(anomaly["id"]))
                 self.hint = str(anomaly["label"])
                 return True
-        self.hint = "这里没什么。记忆需要更敏锐一些。"
+        self.shadow_y -= 12.0
+        self.hint = "判断错误。黑暗逼近了。"
         return False
 
     def trigger_top_door(self) -> None:
@@ -55,6 +57,7 @@ class ZeroHourLoop(HorrorDemo):
         self.loops += 1
         self.player_x = 124.0
         self.player_y = 174.0
+        self.shadow_y = 220.0 - (self.loops * 8)
         self.hint = f"第 {self.loops} 次循环：某些细节改变了。"
         if self.loops >= 6:
             self.mark_failure("你停止了寻找差异。公寓记住了你的名字。")
@@ -72,8 +75,13 @@ class ZeroHourLoop(HorrorDemo):
         self.player_x = clamp(self.player_x, self.room_rect[0] + 4, self.room_rect[0] + self.room_rect[2] - 12)
         self.player_y = clamp(self.player_y, self.room_rect[1] + 4, PLAYFIELD_HEIGHT - 22)
 
-        if pyxel.btnp(pyxel.KEY_E):
+        if pyxel.btnp(pyxel.E):
             self.inspect_nearby_anomaly()
+
+        if not self.finished:
+            self.shadow_y -= 0.08 + (self.loops * 0.02)
+            if self.player_y + 4 > self.shadow_y:
+                self.mark_failure("黑暗吞噬了你。循环结束。")
 
         if point_in_rect(self.player_x + 4, self.player_y + 4, self.top_door):
             self.trigger_top_door()
@@ -108,6 +116,13 @@ class ZeroHourLoop(HorrorDemo):
                 pyxel.line(122 + offset, 140, 120 + offset, 152, bleed)
 
         pyxel.rect(self.player_x, self.player_y, 8, 8, 11)
+
+        if self.shadow_y < PLAYFIELD_HEIGHT:
+            sy = int(self.shadow_y)
+            pyxel.rect(self.room_rect[0] + 1, sy, self.room_rect[2] - 2, PLAYFIELD_HEIGHT - sy, 0)
+            for i in range(self.room_rect[0] + 1, self.room_rect[0] + self.room_rect[2] - 1, 4):
+                pyxel.line(i, sy, i, sy - 4 + (pyxel.frame_count % 4), 0)
+
         if self.font:
             pyxel.text(10, 10, self.hint, 7, self.font)
         else:

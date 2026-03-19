@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import random
 from typing import Iterable
 
 import pyxel
@@ -115,3 +116,100 @@ def draw_outcome_overlay(title: str, message: str, success: bool, font: pyxel.Fo
     draw_centered_text(84, title, accent, font=font)
     draw_wrapped_text(48, 98, message, 7, 24, font=font)
     draw_centered_text(126, "R: 重试 (Restart)  ESC: 返回菜单 (Menu)", 6, font=font)
+
+# --- JUICE SYSTEMS ---
+
+class Particle:
+    def __init__(self, x: float, y: float, vx: float, vy: float, life: int, color: int):
+        self.x = x
+        self.y = y
+        self.vx = vx
+        self.vy = vy
+        self.life = life
+        self.max_life = life
+        self.color = color
+
+    def update(self):
+        self.x += self.vx
+        self.y += self.vy
+        self.vx *= 0.9  # friction
+        self.vy *= 0.9
+        self.life -= 1
+
+class ParticleSystem:
+    def __init__(self):
+        self.particles = []
+
+    def emit(self, x: float, y: float, count: int, color_list: list[int], speed: float = 2.0, life: int = 20):
+        for _ in range(count):
+            angle = random.uniform(0, math.pi * 2)
+            s = random.uniform(speed * 0.2, speed)
+            c = random.choice(color_list)
+            l = random.randint(life // 2, life)
+            self.particles.append(Particle(x, y, math.cos(angle) * s, math.sin(angle) * s, l, c))
+
+    def update(self):
+        for p in self.particles:
+            p.update()
+        self.particles = [p for p in self.particles if p.life > 0]
+
+    def draw(self, cam_x: float = 0, cam_y: float = 0):
+        for p in self.particles:
+            if pyxel.frame_count % 3 != 0 or p.life > p.max_life // 3:
+                pyxel.pset(p.x - cam_x, p.y - cam_y, p.color)
+
+class FloatingText:
+    def __init__(self, x: float, y: float, text: str, color: int, life: int = 45):
+        self.x = x
+        self.y = y
+        self.text = text
+        self.color = color
+        self.life = life
+        self.max_life = life
+
+    def update(self):
+        self.y -= 0.5 # Float upwards
+        self.life -= 1
+
+class FloatingTextSystem:
+    def __init__(self):
+        self.texts = []
+
+    def emit(self, x: float, y: float, text: str, color: int, life: int = 45):
+        self.texts.append(FloatingText(x, y + random.randint(-5, 5), text, color, life))
+
+    def update(self):
+        for t in self.texts:
+            t.update()
+        self.texts = [t for t in self.texts if t.life > 0]
+
+    def draw(self, font: pyxel.Font | None, cam_x: float = 0, cam_y: float = 0):
+        for t in self.texts:
+            if t.life < 10 and pyxel.frame_count % 2 == 0:
+                continue # flicker before vanishing
+            if font:
+                pyxel.text(t.x - cam_x, t.y - cam_y, t.text, t.color, font)
+            else:
+                pyxel.text(t.x - cam_x, t.y - cam_y, t.text, t.color)
+
+class ScreenShake:
+    def __init__(self):
+        self.intensity = 0.0
+        self.decay = 0.9
+
+    def add_shake(self, amount: float):
+        self.intensity = min(self.intensity + amount, 20.0)
+
+    def update(self):
+        if self.intensity > 0.1:
+            self.intensity *= self.decay
+        else:
+            self.intensity = 0.0
+
+    def get_offset(self) -> tuple[float, float]:
+        if self.intensity <= 0:
+            return 0.0, 0.0
+        # return random offset based on intensity
+        ox = random.uniform(-self.intensity, self.intensity)
+        oy = random.uniform(-self.intensity, self.intensity)
+        return ox, oy

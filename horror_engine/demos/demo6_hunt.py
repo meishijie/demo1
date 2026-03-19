@@ -9,8 +9,8 @@ from horror_engine.manager import HorrorDemo
 class BloodMoonHunt(HorrorDemo):
     title_en = "Blood Moon Hunt"
     title_cn = "血月狩猎"
-    description_cn = "你是村庄里的幽灵。熄灭火把，显露真身，将每一个目击者赶进深渊。"
-    goal_cn = "熄灭灯火，恐吓所有村民，在黎明到来前完成任务。"
+    description_cn = "你是村庄里的幽灵。熄灭火把，显露真身，将每一个目击者赶进深渊。小心巡逻的守卫。"
+    goal_cn = "熄灭灯火，恐吓村民。如果被守卫的提灯照亮且你正在显形，幽灵就会消散。"
     controls_cn = "WASD: 飘动  空格: 熄灭火把"
     accent_color = 8
 
@@ -33,6 +33,7 @@ class BloodMoonHunt(HorrorDemo):
             {"x": 112.0, "y": 166.0, "fear": 0.0, "state": "calm"},
             {"x": 192.0, "y": 88.0, "fear": 0.0, "state": "calm"},
         ]
+        self.guard = {"x": 128.0, "y": 140.0, "vx": 1.2, "vy": -0.7}
         self.set_status("已逃离 0/4", "火把 4")
 
     def extinguish_nearby_torches(self) -> None:
@@ -72,6 +73,18 @@ class BloodMoonHunt(HorrorDemo):
 
         if not self.finished:
             self.timer = max(0, self.timer - 1)
+            
+            # Update guard
+            self.guard["x"] = float(self.guard["x"]) + float(self.guard["vx"])
+            self.guard["y"] = float(self.guard["y"]) + float(self.guard["vy"])
+            
+            if float(self.guard["x"]) < 20 or float(self.guard["x"]) > 220:
+                self.guard["vx"] = -float(self.guard["vx"])
+            if float(self.guard["y"]) < 20 or float(self.guard["y"]) > PLAYFIELD_HEIGHT - 20:
+                self.guard["vy"] = -float(self.guard["vy"])
+                
+            if distance(self.px, self.py, float(self.guard["x"]), float(self.guard["y"])) < 40 and self.visibility > 12:
+                self.mark_failure("守卫的提灯驱散了你。你成为了真正的虚无。")
 
         for villager in self.villagers:
             if villager["state"] == "escaped":
@@ -114,6 +127,12 @@ class BloodMoonHunt(HorrorDemo):
                 pyxel.circ(torch["x"], torch["y"], 3, 7)
             else:
                 pyxel.circ(torch["x"], torch["y"], 3, 13)
+
+        gx = float(self.guard["x"])
+        gy = float(self.guard["y"])
+        pyxel.circ(gx, gy, 40, 9)
+        pyxel.circ(gx, gy, 4, 8)
+        pyxel.circ(gx, gy, 2, 10)
 
         for villager in self.villagers:
             if villager["state"] == "escaped":

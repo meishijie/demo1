@@ -20,8 +20,9 @@ class AbyssalEchoes(HorrorDemo):
     title_cn = "深渊回声"
     description_cn = "在溺水的地下迷宫通过声呐导航。每次砰砰声都会描绘路径，但也唤醒了下方的猎手。"
     goal_cn = "在怪物追上你之前，到达右上角的舱口。"
-    controls_cn = "WASD: 移动  空格: 声呐脉冲"
+    controls_cn = "WASD: 移动  空格: 声呐脉冲  左键: 投掷发声诱饵"
     accent_color = 12
+    uses_mouse = True
 
     def __init__(self, font: pyxel.Font | None = None):
         super().__init__(font=font)
@@ -32,6 +33,8 @@ class AbyssalEchoes(HorrorDemo):
         self.exit_rect = (224, 20, 18, 18)
         self.pulses: list[list[float]] = []
         self.ping_count = 0
+        self.decoys_left = 3
+        self.active_decoys: list[dict[str, float]] = []
         self.revealed_exit_timer = 0
         self.revealed_walls: dict[int, int] = {}
         self.walls = [
@@ -45,7 +48,7 @@ class AbyssalEchoes(HorrorDemo):
         self.enemy_y = 184.0
         self.enemy_awake = False
         self.enemy_speed = 0.45
-        self.set_status("脉冲 0", "威胁：沉睡中")
+        self.set_status("脉冲 0 | 诱饵 3", "威胁：沉睡中")
 
     def emit_pulse(self) -> None:
         if self.finished:
@@ -106,6 +109,42 @@ class AbyssalEchoes(HorrorDemo):
         if pyxel.btnp(pyxel.KEY_SPACE):
             self.emit_pulse()
 
+        if pyxel.btnp(pyxel.MOUSE_BUTTON_LEFT) and self.decoys_left > 0 and not self.finished:
+            mx = pyxel.mouse_x
+            my = pyxel.mouse_y
+            px = self.player_x + 4
+            py = self.player_y + 4
+            dx0 = mx - px
+            dy0 = my - py
+            gap0 = math.hypot(dx0, dy0)
+            if gap0 > 0:
+                gap0 = min(gap0, 75.0)
+                steps = int(gap0 / 2.0)
+                land_x = px
+                land_y = py
+                for i in range(1, steps + 1):
+                    test_x = px + dx0/gap0 * (i * 2.0)
+                    test_y = py + dy0/gap0 * (i * 2.0)
+                    in_wall = False
+                    for wall in self.walls:
+                        if point_in_rect(test_x, test_y, wall):
+                            in_wall = True
+                            break
+                    if in_wall:
+                        break
+                    land_x = test_x
+                    land_y = test_y
+                self.active_decoys.append({"x": land_x, "y": land_y, "timer": 160.0})
+                self.decoys_left -= 1
+                self.enemy_awake = True
+
+        for decoy in self.active_decoys[:]:
+            decoy["timer"] -= 1.0
+            if int(decoy["timer"]) % 50 == 0:
+                self.pulses.append([decoy["x"], decoy["y"], 0, 90.0])
+            if decoy["timer"] <= 0:
+                self.active_decoys.remove(decoy)
+
         for pulse in self.pulses[:]:
             pulse[2] += 4
             if pulse[2] > pulse[3]:
@@ -126,9 +165,15 @@ class AbyssalEchoes(HorrorDemo):
             self.revealed_exit_timer -= 1
 
         if self.enemy_awake:
-            self.enemy_speed = 0.45 + min(0.55, self.ping_count * 0.08)
-            dx = self.player_x + 4 - self.enemy_x
-            dy = self.player_y + 4 - self.enemy_y
+            self.enemy_speed = 0.45 + min(0.65, self.ping_count * 0.08)
+            target_x = self.player_x + 4
+            target_y = self.player_y + 4
+            if self.active_decoys:
+                target_x = self.active_decoys[-1]["x"]
+                target_y = self.active_decoys[-1]["y"]
+
+            dx = target_x - self.enemy_x
+            dy = target_y - self.enemy_y
             gap = math.hypot(dx, dy)
             if gap > 0:
                 self.enemy_x += dx / gap * self.enemy_speed
@@ -136,7 +181,9 @@ class AbyssalEchoes(HorrorDemo):
 
         self._check_outcome()
         threat = "正在猎杀！" if self.enemy_awake else "沉睡中"
-        self.set_status(f"脉冲次数 {self.ping_count}", f"威胁：{threat}")
+        if self.active_decoys:
+            threat = "被诱饵吸引！"
+        self.set_status(f"脉冲 {self.ping_count} | 诱饵 {self.decoys_left}/3", f"威胁：{threat}")
 
     def draw(self) -> None:
         pyxel.cls(0)
@@ -156,6 +203,9 @@ class AbyssalEchoes(HorrorDemo):
             color = 5 if index in self.revealed_walls else 1
             pyxel.rect(wall[0], wall[1], wall[2], wall[3], 0)
             pyxel.rectb(wall[0], wall[1], wall[2], wall[3], color)
+
+        for decoy in self.active_decoys:
+            pyxel.circ(decoy["x"], decoy["y"], 2, 10 if (pyxel.frame_count//4)%2==0 else 9)
 
         pyxel.rect(self.player_x, self.player_y, self.player_size, self.player_size, 7)
 

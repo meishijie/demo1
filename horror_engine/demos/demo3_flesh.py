@@ -10,7 +10,7 @@ class FleshFactory(HorrorDemo):
     title_en = "The Flesh Factory"
     title_cn = "血肉工厂"
     description_cn = "一座屠宰平台竖井提供了一个交易：献祭你的腿以跳得更高，逃离下方的研磨机。"
-    goal_cn = "献祭双腿，攀爬血肉脚手架，在身体崩溃前进入升降机。"
+    goal_cn = "献祭双腿换取跳跃高度，躲避上升的电锯，在身体崩溃前进入升降机。"
     controls_cn = "A/D: 移动  W: 跳跃  X: 献祭"
     accent_color = 8
 
@@ -23,8 +23,10 @@ class FleshFactory(HorrorDemo):
         self.pvx = 0.0
         self.pvy = 0.0
         self.on_ground = False
-        self.integrity = 100
+        self.integrity = 100.0
         self.leg_sacrificed = False
+        self.bleeding = False
+        self.grinder_y = float(PLAYFIELD_HEIGHT + 10)
         self.gravity = 0.38
         self.base_jump = -6.4
         self.platforms = [
@@ -41,18 +43,10 @@ class FleshFactory(HorrorDemo):
         if self.leg_sacrificed or self.finished:
             return
         self.leg_sacrificed = True
-        self.integrity -= 30
+        self.bleeding = True
+        self.integrity -= 30.0
         if self.integrity <= 0:
             self.mark_failure("机器夺走了太多。剩下的部分已经无法爬出了。")
-
-    def _reset_after_fall(self) -> None:
-        self.px = self.start_x
-        self.py = self.start_y
-        self.pvx = 0
-        self.pvy = 0
-        self.integrity -= 15
-        if self.integrity <= 0:
-            self.mark_failure("传送带不断吞噬着碎片，直到不再剩下任何人类的意志。")
 
     def update(self) -> None:
         speed = 2.4 if not self.leg_sacrificed else 1.5
@@ -84,14 +78,24 @@ class FleshFactory(HorrorDemo):
                     self.pvy = 0
                     self.on_ground = True
 
-        if self.py > PLAYFIELD_HEIGHT:
-            self._reset_after_fall()
+        if not self.finished:
+            self.grinder_y -= 0.35
+            if self.bleeding:
+                self.integrity -= 0.05
+                if self.integrity <= 0:
+                    self.mark_failure("失血过多。你的旅程到此为止。")
+
+        if self.py + 4 > self.grinder_y and not self.finished:
+            self.mark_failure("电锯将你绞碎。工厂获得了新的原料。")
+            
+        if self.py > PLAYFIELD_HEIGHT and not self.finished:
+            self.mark_failure("你坠入了深渊。")
 
         if rects_overlap(self.px, self.py, 8, 8, *self.exit_rect):
             self.mark_success("升降机接受了报酬。大门在钩锁触及前关上了。")
 
-        leg_state = "已献祭断肢" if self.leg_sacrificed else "肢体完整"
-        self.set_status(f"身体完整度 {self.integrity}%", leg_state)
+        leg_state = "流血中" if self.bleeding else "肢体完整"
+        self.set_status(f"身体完整度 {int(self.integrity)}%", leg_state)
 
     def draw(self) -> None:
         pyxel.cls(0)
@@ -109,5 +113,12 @@ class FleshFactory(HorrorDemo):
         pyxel.rect(self.px, self.py, 8, 8, body_color)
         if self.leg_sacrificed:
             pyxel.rect(self.px + 2, self.py + 6, 4, 2, 0)
+
+        gy = int(self.grinder_y)
+        if gy < PLAYFIELD_HEIGHT:
+            pyxel.rect(0, gy, 256, PLAYFIELD_HEIGHT - gy, 8)
+            for i in range(0, 256, 12):
+                blade_y = gy - 4 + (pyxel.frame_count % 4)
+                pyxel.tri(i, gy, i+6, blade_y, i+12, gy, 13)
 
         draw_meter(150, 205, 80, self.integrity, 100, 8)
